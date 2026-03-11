@@ -378,44 +378,46 @@ class FourSAILModel:
     def _hotspot_terms(
         self, hotspot: torch.Tensor, dso: torch.Tensor, ks: torch.Tensor, ko: torch.Tensor, lai: torch.Tensor
     ) -> Tuple[torch.Tensor, torch.Tensor]:
-        batch = hotspot.shape[0]
-        tsstoo = torch.zeros(batch, device=hotspot.device, dtype=hotspot.dtype)
-        sumint = torch.zeros_like(tsstoo)
-        for idx in range(batch):
-            lai_i = float(lai[idx].item())
-            ks_i = float(ks[idx].item())
-            ko_i = float(ko[idx].item())
-            hotspot_i = float(hotspot[idx].item())
-            dso_i = float(dso[idx].item())
-            if hotspot_i <= 0 or dso_i == 0:
-                ts = math.exp(-ks_i * lai_i)
-                tsstoo[idx] = ts
-                sumint[idx] = (1.0 - ts) / (ks_i * lai_i)
-                continue
-            alf = (dso_i / hotspot_i) * 2.0 / (ks_i + ko_i)
-            if alf == 0:
-                ts = math.exp(-ks_i * lai_i)
-                tsstoo[idx] = ts
-                sumint[idx] = (1.0 - ts) / (ks_i * lai_i)
-                continue
-            fhot = lai_i * math.sqrt(ko_i * ks_i)
-            x1 = 0.0
-            y1 = 0.0
-            f1 = 1.0
-            fint = (1.0 - math.exp(-alf)) * 0.05
-            acc = 0.0
-            for istep in range(1, 21):
-                if istep < 20:
-                    x2 = -math.log(1.0 - istep * fint) / alf
-                else:
-                    x2 = 1.0
-                y2 = -(ko_i + ks_i) * lai_i * x2 + fhot * (1.0 - math.exp(-alf * x2)) / alf
-                f2 = math.exp(y2)
-                if abs(y2 - y1) > 1e-9:
-                    acc += (f2 - f1) * (x2 - x1) / (y2 - y1)
-                x1, y1, f1 = x2, y2, f2
-            tsstoo[idx] = f1
-            sumint[idx] = acc if not math.isnan(acc) else 0.0
+        tsstoo = torch.exp(-ks * lai)
+        sumint = (1.0 - tsstoo) / (ks * lai)
+
+        active = (hotspot > 0) & (dso != 0)
+        if not active.any():
+            return tsstoo, sumint
+
+        alf = torch.zeros_like(hotspot)
+        alf[active] = (dso[active] / hotspot[active]) * 2.0 / (ks[active] + ko[active])
+        active = active & (alf != 0)
+        if not active.any():
+            return tsstoo, sumint
+
+        lai_a = lai[active]
+        ks_a = ks[active]
+        ko_a = ko[active]
+        alf_a = alf[active]
+
+        fhot = lai_a * torch.sqrt(ko_a * ks_a)
+        fint = (1.0 - torch.exp(-alf_a)) * 0.05
+
+        x1 = torch.zeros_like(alf_a)
+        y1 = torch.zeros_like(alf_a)
+        f1 = torch.ones_like(alf_a)
+        acc = torch.zeros_like(alf_a)
+
+        for istep in range(1, 21):
+            if istep < 20:
+                x2 = -torch.log1p(-istep * fint) / alf_a
+            else:
+                x2 = torch.ones_like(alf_a)
+            y2 = -(ko_a + ks_a) * lai_a * x2 + fhot * (1.0 - torch.exp(-alf_a * x2)) / alf_a
+            f2 = torch.exp(y2)
+            delta = y2 - y1
+            valid = torch.abs(delta) > 1e-9
+            acc = acc + torch.where(valid, (f2 - f1) * (x2 - x1) / delta, torch.zeros_like(acc))
+            x1, y1, f1 = x2, y2, f2
+
+        tsstoo[active] = f1
+        sumint[active] = torch.nan_to_num(acc, nan=0.0)
         return tsstoo, sumint
 
     def _solve_four_stream(
