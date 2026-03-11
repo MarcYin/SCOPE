@@ -150,7 +150,15 @@ class CanopyFluorescenceModel:
 
         lai_tensor = self._expand_batch(lai, leaf_fluor_back.shape[0], device=leaf_fluor_back.device, dtype=leaf_fluor_back.dtype)
         Femleaves_ = lai_tensor.unsqueeze(-1) * (leaf_fluor_back + leaf_fluor_forw)
-        EoutFrc_ = Femleaves_.clone()
+        EoutFrc_ = self._simple_reabsorption_corrected_source(
+            leafopt=leafopt,
+            leafbio=leafbio,
+            excitation=excitation_tensor,
+            lai=lai_tensor,
+            wlP=wlP,
+            wlE=wlE,
+            wlF=wlF,
+        )
 
         gammasdf = self._interp1d(wlP, sail.gammasdf, wlF)
         gammasdb = self._interp1d(wlP, sail.gammasdb, wlF)
@@ -162,6 +170,7 @@ class CanopyFluorescenceModel:
 
         EoutF_ = upward_escape * EoutFrc_
         LoF_ = sigmaF * EoutFrc_ / torch.pi
+        sigmaF = (LoF_ * torch.pi) / EoutFrc_.clamp(min=1e-12)
 
         F685, wl685 = self._peak_in_window(LoF_, wlF, max_wavelength=700.0)
         F740, wl740 = self._peak_in_window(LoF_, wlF, min_wavelength=700.0)
@@ -266,20 +275,22 @@ class CanopyFluorescenceModel:
         Esky = self._prepare_spectrum(Esky_, leafopt.Mb.shape[0], wlE.numel())
         direct = self.layered_transport.flux_profiles(transport_e, Esun, torch.zeros_like(Esky))
         diffuse = self.layered_transport.flux_profiles(transport_e, torch.zeros_like(Esun), Esky)
+        total_Emin = direct.Emin_ + diffuse.Emin_
+        total_Eplu = direct.Eplu_ + diffuse.Eplu_
 
         Mplu = 0.5 * (leafopt.Mb + leafopt.Mf)
         Mmin = 0.5 * (leafopt.Mb - leafopt.Mf)
         MpluEsun = self._matrix_energy_product(Mplu, Esun, wlE, wlF)
         MminEsun = self._matrix_energy_product(Mmin, Esun, wlE, wlF)
-        MpluEmin = self._matrix_energy_product_layered(Mplu, direct.Emin_[:, :-1, :] + diffuse.Emin_[:, :-1, :], wlE, wlF)
-        MpluEplu = self._matrix_energy_product_layered(Mplu, direct.Eplu_[:, :-1, :] + diffuse.Eplu_[:, :-1, :], wlE, wlF)
-        MminEmin = self._matrix_energy_product_layered(Mmin, direct.Emin_[:, :-1, :] + diffuse.Emin_[:, :-1, :], wlE, wlF)
-        MminEplu = self._matrix_energy_product_layered(Mmin, direct.Eplu_[:, :-1, :] + diffuse.Eplu_[:, :-1, :], wlE, wlF)
+        MpluEmin = self._matrix_energy_product_layered(Mplu, total_Emin[:, :-1, :], wlE, wlF)
+        MpluEplu = self._matrix_energy_product_layered(Mplu, total_Eplu[:, :-1, :], wlE, wlF)
+        MminEmin = self._matrix_energy_product_layered(Mmin, total_Emin[:, :-1, :], wlE, wlF)
+        MminEplu = self._matrix_energy_product_layered(Mmin, total_Eplu[:, :-1, :], wlE, wlF)
 
         etau_orient = self._prepare_etau(etau, transport_e)
-        etah_layer = self._prepare_etah(etah, transport_e)
+        etah_orient = self._prepare_etah(etah, transport_e)
         etau_lidf = etau_orient * transport_e.lidf_azimuth.unsqueeze(1)
-        etah_lidf = etah_layer.unsqueeze(-1) * transport_e.lidf_azimuth.unsqueeze(1)
+        etah_lidf = etah_orient * transport_e.lidf_azimuth.unsqueeze(1)
 
         absfsfo_tau = (etau_lidf * transport_e.absfs.unsqueeze(1) * transport_e.absfo.unsqueeze(1)).sum(dim=-1)
         fsfo_tau = (etau_lidf * transport_e.fsfo.unsqueeze(1)).sum(dim=-1)
@@ -350,7 +361,19 @@ class CanopyFluorescenceModel:
         LoF_ = piLtot / torch.pi
         EoutF_ = Fplu[:, 0, :]
         Femleaves_ = (Femmin + Femplu).sum(dim=1)
-        EoutFrc_ = Femleaves_
+        EoutFrc_ = self._layered_reabsorption_corrected_source(
+            leafopt=leafopt,
+            leafbio=leafbio,
+            Esun=Esun,
+            total_Emin=total_Emin,
+            total_Eplu=total_Eplu,
+            transport=transport_e,
+            etau=etau_orient,
+            etah=etah_orient,
+            wlP=wlP,
+            wlE=wlE,
+            wlF=wlF,
+        )
         sigmaF = (LoF_ * torch.pi) / EoutFrc_.clamp(min=1e-12)
 
         reflectance = self.reflectance_model(
@@ -473,9 +496,78 @@ class CanopyFluorescenceModel:
         emitted = torch.einsum("bfe,ble->blf", matrix, photons)
         return self._ephoton(wlF).view(1, 1, -1) * emitted
 
+    def _simple_reabsorption_corrected_source(
+        self,
+        *,
+        leafopt,
+        leafbio: LeafBioBatch,
+        excitation: torch.Tensor,
+        lai: torch.Tensor,
+        wlP: torch.Tensor,
+        wlE: torch.Tensor,
+        wlF: torch.Tensor,
+    ) -> torch.Tensor:
+        batch = leafopt.refl.shape[0]
+        rho_e = self._sample_spectrum(leafopt.refl, wlP, wlE)
+        tau_e = self._sample_spectrum(leafopt.tran, wlP, wlE)
+        kchl_e = self._sample_spectrum(leafopt.kChlrel, wlP, wlE)
+        epsc_e = (1.0 - rho_e - tau_e).clamp(min=0.0)
+        absorbed_cab = 0.001 * torch.trapz(self._e2phot(wlE, excitation * epsc_e * kchl_e), wlE, dim=-1)
+        fqe = self._expand_batch(leafbio.fqe, batch, device=excitation.device, dtype=excitation.dtype)
+        poutfrc = fqe * lai * absorbed_cab
+        return self._source_spectrum_from_poutfrc(poutfrc, wlP=wlP, wlF=wlF)
+
+    def _layered_reabsorption_corrected_source(
+        self,
+        *,
+        leafopt,
+        leafbio: LeafBioBatch,
+        Esun: torch.Tensor,
+        total_Emin: torch.Tensor,
+        total_Eplu: torch.Tensor,
+        transport: LayeredCanopyTransfer,
+        etau: torch.Tensor,
+        etah: torch.Tensor,
+        wlP: torch.Tensor,
+        wlE: torch.Tensor,
+        wlF: torch.Tensor,
+    ) -> torch.Tensor:
+        batch = leafopt.refl.shape[0]
+        rho_e = self._sample_spectrum(leafopt.refl, wlP, wlE)
+        tau_e = self._sample_spectrum(leafopt.tran, wlP, wlE)
+        kchl_e = self._sample_spectrum(leafopt.kChlrel, wlP, wlE)
+        epsc_e = (1.0 - rho_e - tau_e).clamp(min=0.0)
+
+        pnsun_cab = 0.001 * torch.trapz(self._e2phot(wlE, Esun * epsc_e * kchl_e), wlE, dim=-1)
+        E_layer = 0.5 * (total_Emin[:, :-1, :] + total_Emin[:, 1:, :] + total_Eplu[:, :-1, :] + total_Eplu[:, 1:, :])
+        pndif_cab = 0.001 * torch.trapz(
+            self._e2phot(wlE, E_layer * epsc_e.unsqueeze(1) * kchl_e.unsqueeze(1)),
+            wlE,
+            dim=-1,
+        )
+
+        eta_weights = transport.lidf_azimuth.unsqueeze(1)
+        pnuc_cab = transport.fs.unsqueeze(1) * pnsun_cab.view(batch, 1, 1) + pndif_cab.unsqueeze(-1)
+        sunlit_eta_abs = (etau * eta_weights * pnuc_cab).sum(dim=-1)
+        shaded_eta_abs = (etah * eta_weights * pndif_cab.unsqueeze(-1)).sum(dim=-1)
+
+        Ps = transport.Ps[:, : transport.nlayers]
+        fqe = self._expand_batch(leafbio.fqe, batch, device=Esun.device, dtype=Esun.dtype)
+        poutfrc = fqe * transport.iLAI * torch.sum(Ps * sunlit_eta_abs + (1.0 - Ps) * shaded_eta_abs, dim=-1)
+        return self._source_spectrum_from_poutfrc(poutfrc, wlP=wlP, wlF=wlF)
+
+    def _source_spectrum_from_poutfrc(self, poutfrc: torch.Tensor, *, wlP: torch.Tensor, wlF: torch.Tensor) -> torch.Tensor:
+        batch = poutfrc.shape[0]
+        phi = self.reflectance_model.fluspect.optipar.phi.unsqueeze(0).expand(batch, -1)
+        phi_em = self._sample_spectrum(phi, wlP, wlF)
+        ep = self._ephoton(wlF).unsqueeze(0)
+        return 1e-3 * ep * poutfrc.unsqueeze(-1) * phi_em
+
     def _prepare_etau(self, etau: Optional[torch.Tensor], transfer: LayeredCanopyTransfer) -> torch.Tensor:
         batch = transfer.Ps.shape[0]
         nl = transfer.nlayers
+        ninc = transfer.litab.numel()
+        nazi = transfer.lazitab.numel()
         nori = transfer.lidf_azimuth.shape[1]
         device = transfer.Ps.device
         dtype = transfer.Ps.dtype
@@ -499,29 +591,51 @@ class CanopyFluorescenceModel:
                 return tensor.expand(batch, nl, nori)
             if tensor.shape[0] == batch and tensor.shape[1] == nl:
                 return tensor
+        if tensor.ndim == 3 and tensor.shape == (nl, ninc, nazi):
+            return tensor.reshape(1, nl, nori).expand(batch, nl, nori)
+        if tensor.ndim == 4 and tensor.shape[-2:] == (ninc, nazi):
+            if tensor.shape[0] == 1 and tensor.shape[1] == nl:
+                return tensor.reshape(1, nl, nori).expand(batch, nl, nori)
+            if tensor.shape[0] == batch and tensor.shape[1] == nl:
+                return tensor.reshape(batch, nl, nori)
         raise ValueError(f"etau must broadcast to shape ({batch}, {nl}, {nori}), got {tuple(tensor.shape)}")
 
     def _prepare_etah(self, etah: Optional[torch.Tensor], transfer: LayeredCanopyTransfer) -> torch.Tensor:
         batch = transfer.Ps.shape[0]
         nl = transfer.nlayers
+        ninc = transfer.litab.numel()
+        nazi = transfer.lazitab.numel()
+        nori = transfer.lidf_azimuth.shape[1]
         device = transfer.Ps.device
         dtype = transfer.Ps.dtype
         if etah is None:
-            return torch.ones((batch, nl), device=device, dtype=dtype)
+            return torch.ones((batch, nl, nori), device=device, dtype=dtype)
         tensor = torch.as_tensor(etah, device=device, dtype=dtype)
         if tensor.ndim == 0:
-            return tensor.view(1, 1).expand(batch, nl)
+            return tensor.view(1, 1, 1).expand(batch, nl, nori)
         if tensor.ndim == 1:
             if tensor.shape[0] == batch:
-                return tensor.view(batch, 1).expand(batch, nl)
+                return tensor.view(batch, 1, 1).expand(batch, nl, nori)
             if tensor.shape[0] == nl:
-                return tensor.view(1, nl).expand(batch, nl)
+                return tensor.view(1, nl, 1).expand(batch, nl, nori)
         if tensor.ndim == 2:
             if tensor.shape == (batch, nl):
-                return tensor
+                return tensor.unsqueeze(-1).expand(batch, nl, nori)
             if tensor.shape[0] == 1 and tensor.shape[1] == nl:
-                return tensor.expand(batch, nl)
-        raise ValueError(f"etah must broadcast to shape ({batch}, {nl}), got {tuple(tensor.shape)}")
+                return tensor.unsqueeze(-1).expand(batch, nl, nori)
+        if tensor.ndim == 3 and tensor.shape[-1] == nori:
+            if tensor.shape[0] == 1 and tensor.shape[1] == nl:
+                return tensor.expand(batch, nl, nori)
+            if tensor.shape[0] == batch and tensor.shape[1] == nl:
+                return tensor
+        if tensor.ndim == 3 and tensor.shape == (nl, ninc, nazi):
+            return tensor.reshape(1, nl, nori).expand(batch, nl, nori)
+        if tensor.ndim == 4 and tensor.shape[-2:] == (ninc, nazi):
+            if tensor.shape[0] == 1 and tensor.shape[1] == nl:
+                return tensor.reshape(1, nl, nori).expand(batch, nl, nori)
+            if tensor.shape[0] == batch and tensor.shape[1] == nl:
+                return tensor.reshape(batch, nl, nori)
+        raise ValueError(f"etah must broadcast to shape ({batch}, {nl}, {nori}), got {tuple(tensor.shape)}")
 
     def _peak_in_window(
         self,

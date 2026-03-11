@@ -1,6 +1,6 @@
 import torch
 
-from scope_torch.canopy.foursail import FourSAILModel, campbell_lidf
+from scope_torch.canopy.foursail import FourSAILModel, campbell_lidf, scope_lidf
 from scope_torch.canopy.thermal import CanopyThermalRadianceModel, ThermalOptics, default_thermal_wavelengths
 from scope_torch.spectral.soil import SoilEmpiricalParams
 
@@ -106,3 +106,37 @@ def test_canopy_thermal_factory_accepts_reflectance_configuration():
     assert model.reflectance_model.sail is sail
     assert float(model.reflectance_model.soil_bsm.empirical.SMC) == 30.0
     assert float(model.reflectance_model.soil_bsm.empirical.film) == 0.02
+
+
+def test_canopy_thermal_radiance_accepts_orientation_resolved_leaf_temperatures():
+    device = torch.device("cpu")
+    dtype = torch.float64
+    lidf = scope_lidf(0.0, 0.0, device=device, dtype=dtype)
+    model = CanopyThermalRadianceModel.from_scope_assets(lidf=lidf, device=device, dtype=dtype)
+
+    layer_mean = model(
+        torch.tensor([3.0], device=device, dtype=dtype),
+        torch.tensor([30.0], device=device, dtype=dtype),
+        torch.tensor([20.0], device=device, dtype=dtype),
+        torch.tensor([10.0], device=device, dtype=dtype),
+        torch.full((1, 3), 25.0, device=device, dtype=dtype),
+        torch.full((1, 3), 23.0, device=device, dtype=dtype),
+        torch.tensor([27.0], device=device, dtype=dtype),
+        torch.tensor([21.0], device=device, dtype=dtype),
+        nlayers=3,
+    )
+    oriented = model(
+        torch.tensor([3.0], device=device, dtype=dtype),
+        torch.tensor([30.0], device=device, dtype=dtype),
+        torch.tensor([20.0], device=device, dtype=dtype),
+        torch.tensor([10.0], device=device, dtype=dtype),
+        torch.full((1, 3, 13, 36), 25.0, device=device, dtype=dtype),
+        torch.full((1, 3, 13, 36), 23.0, device=device, dtype=dtype),
+        torch.tensor([27.0], device=device, dtype=dtype),
+        torch.tensor([21.0], device=device, dtype=dtype),
+        nlayers=3,
+    )
+
+    assert torch.allclose(oriented.Lot_, layer_mean.Lot_, atol=1e-12, rtol=1e-10)
+    assert torch.allclose(oriented.Eoutte_, layer_mean.Eoutte_, atol=1e-12, rtol=1e-10)
+    assert torch.allclose(oriented.LotBB_, layer_mean.LotBB_, atol=1e-12, rtol=1e-10)
