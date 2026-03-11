@@ -5,6 +5,7 @@ from typing import Optional
 
 import torch
 
+from ..biochem import BiochemicalOptions, LeafBiochemistryInputs, LeafBiochemistryModel, LeafBiochemistryResult, LeafMeteo
 from .foursail import FourSAILModel
 from .layered_rt import LayeredCanopyTransfer, LayeredCanopyTransportModel
 from .reflectance import CanopyReflectanceModel
@@ -40,12 +41,25 @@ class CanopyFluorescenceResult:
     Fplu_: torch.Tensor
 
 
+@dataclass(slots=True)
+class CanopyBiochemicalFluorescenceResult:
+    fluorescence: CanopyFluorescenceResult
+    sunlit: LeafBiochemistryResult
+    shaded: LeafBiochemistryResult
+    Pnu_Cab: torch.Tensor
+    Pnh_Cab: torch.Tensor
+
+
 class CanopyFluorescenceModel:
     """Canopy fluorescence transport with both simple and layered modes."""
 
     def __init__(self, reflectance_model: CanopyReflectanceModel) -> None:
         self.reflectance_model = reflectance_model
         self.layered_transport = LayeredCanopyTransportModel(reflectance_model.sail)
+        self.leaf_biochemistry = LeafBiochemistryModel(
+            device=reflectance_model.fluspect.device,
+            dtype=reflectance_model.fluspect.dtype,
+        )
 
     @classmethod
     def from_scope_assets(
@@ -424,6 +438,116 @@ class CanopyFluorescenceModel:
             Fplu_=Fplu,
         )
 
+    def layered_biochemical(
+        self,
+        leafbio: LeafBioBatch,
+        biochemistry: LeafBiochemistryInputs,
+        soil_refl: torch.Tensor,
+        lai: torch.Tensor,
+        tts: torch.Tensor,
+        tto: torch.Tensor,
+        psi: torch.Tensor,
+        Esun_: torch.Tensor,
+        Esky_: torch.Tensor,
+        *,
+        Csu: torch.Tensor,
+        Csh: torch.Tensor,
+        ebu: torch.Tensor,
+        ebh: torch.Tensor,
+        Tcu: torch.Tensor,
+        Tch: torch.Tensor,
+        Oa: torch.Tensor,
+        p: torch.Tensor,
+        fV: torch.Tensor | float = 1.0,
+        biochem_options: Optional[BiochemicalOptions] = None,
+        hotspot: Optional[torch.Tensor] = None,
+        lidf: Optional[torch.Tensor] = None,
+        nlayers: Optional[int] = None,
+    ) -> CanopyBiochemicalFluorescenceResult:
+        fluspect = self.reflectance_model.fluspect
+        leafopt = fluspect(leafbio)
+        if leafopt.Mb is None or leafopt.Mf is None:
+            raise ValueError("Leaf fluorescence matrices are unavailable. Provide leafbio with fqe > 0.")
+
+        wlP = fluspect.spectral.wlP
+        wlE = fluspect.spectral.wlE
+        if wlE is None:
+            raise ValueError("Spectral grids must define excitation wavelengths")
+
+        hotspot_value = hotspot if hotspot is not None else torch.full_like(torch.as_tensor(lai), self.reflectance_model.default_hotspot)
+        nl = self._resolve_nlayers(nlayers, etau=Tcu, etah=Tch)
+        rho_e = self._sample_spectrum(leafopt.refl, wlP, wlE)
+        tau_e = self._sample_spectrum(leafopt.tran, wlP, wlE)
+        soil_e = self._sample_spectrum(soil_refl, wlP, wlE)
+        transport_e = self.layered_transport.build(
+            rho_e,
+            tau_e,
+            soil_e,
+            lai,
+            tts,
+            tto,
+            psi,
+            hotspot=hotspot_value,
+            lidf=self.reflectance_model.lidf if lidf is None else lidf,
+            nlayers=nl,
+        )
+        Pnu_Cab, Pnh_Cab = self._absorbed_cab_profiles(
+            leafopt=leafopt,
+            transport=transport_e,
+            Esun_=Esun_,
+            Esky_=Esky_,
+            wlP=wlP,
+            wlE=wlE,
+        )
+
+        sunlit = self._run_leaf_biochemistry(
+            biochemistry=biochemistry,
+            Q=Pnu_Cab,
+            Cs=self._prepare_etau(Csu, transport_e),
+            T=self._prepare_etau(Tcu, transport_e),
+            eb=self._prepare_etau(ebu, transport_e),
+            Oa=self._prepare_etau(Oa, transport_e),
+            p=self._prepare_etau(p, transport_e),
+            fV=self._prepare_etau(fV, transport_e),
+            options=biochem_options,
+            target_shape=Pnu_Cab.shape,
+        )
+        shaded = self._run_leaf_biochemistry(
+            biochemistry=biochemistry,
+            Q=Pnh_Cab,
+            Cs=self._prepare_layer_profile(Csh, transport_e),
+            T=self._prepare_layer_profile(Tch, transport_e),
+            eb=self._prepare_layer_profile(ebh, transport_e),
+            Oa=self._prepare_layer_profile(Oa, transport_e),
+            p=self._prepare_layer_profile(p, transport_e),
+            fV=self._prepare_layer_profile(fV, transport_e),
+            options=biochem_options,
+            target_shape=Pnh_Cab.shape,
+        )
+
+        fluorescence = self.layered(
+            leafbio,
+            soil_refl,
+            lai,
+            tts,
+            tto,
+            psi,
+            Esun_,
+            Esky_,
+            etau=sunlit.eta,
+            etah=shaded.eta,
+            hotspot=hotspot,
+            lidf=lidf,
+            nlayers=nl,
+        )
+        return CanopyBiochemicalFluorescenceResult(
+            fluorescence=fluorescence,
+            sunlit=sunlit,
+            shaded=shaded,
+            Pnu_Cab=Pnu_Cab,
+            Pnh_Cab=Pnh_Cab,
+        )
+
     def _prepare_spectrum(self, value: torch.Tensor, batch: int, n_wavelength: int) -> torch.Tensor:
         tensor = torch.as_tensor(value, device=self.reflectance_model.fluspect.device, dtype=self.reflectance_model.fluspect.dtype)
         if tensor.ndim == 1:
@@ -496,6 +620,39 @@ class CanopyFluorescenceModel:
         emitted = torch.einsum("bfe,ble->blf", matrix, photons)
         return self._ephoton(wlF).view(1, 1, -1) * emitted
 
+    def _absorbed_cab_profiles(
+        self,
+        *,
+        leafopt,
+        transport: LayeredCanopyTransfer,
+        Esun_: torch.Tensor,
+        Esky_: torch.Tensor,
+        wlP: torch.Tensor,
+        wlE: torch.Tensor,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        batch = leafopt.refl.shape[0]
+        Esun = self._prepare_spectrum(Esun_, batch, wlE.numel())
+        Esky = self._prepare_spectrum(Esky_, batch, wlE.numel())
+        direct = self.layered_transport.flux_profiles(transport, Esun, torch.zeros_like(Esky))
+        diffuse = self.layered_transport.flux_profiles(transport, torch.zeros_like(Esun), Esky)
+        total_Emin = direct.Emin_ + diffuse.Emin_
+        total_Eplu = direct.Eplu_ + diffuse.Eplu_
+
+        rho_e = self._sample_spectrum(leafopt.refl, wlP, wlE)
+        tau_e = self._sample_spectrum(leafopt.tran, wlP, wlE)
+        kchl_e = self._sample_spectrum(leafopt.kChlrel, wlP, wlE)
+        epsc_e = (1.0 - rho_e - tau_e).clamp(min=0.0)
+
+        pnsun_cab = 1e6 * torch.trapz(self._e2phot(wlE, Esun * epsc_e * kchl_e), wlE, dim=-1)
+        E_layer = 0.5 * (total_Emin[:, :-1, :] + total_Emin[:, 1:, :] + total_Eplu[:, :-1, :] + total_Eplu[:, 1:, :])
+        pndif_cab = 1e6 * torch.trapz(
+            self._e2phot(wlE, E_layer * epsc_e.unsqueeze(1) * kchl_e.unsqueeze(1)),
+            wlE,
+            dim=-1,
+        )
+        pnuc_cab = transport.absfs.unsqueeze(1) * pnsun_cab.view(batch, 1, 1) + pndif_cab.unsqueeze(-1)
+        return pnuc_cab, pndif_cab
+
     def _simple_reabsorption_corrected_source(
         self,
         *,
@@ -547,7 +704,7 @@ class CanopyFluorescenceModel:
         )
 
         eta_weights = transport.lidf_azimuth.unsqueeze(1)
-        pnuc_cab = transport.fs.unsqueeze(1) * pnsun_cab.view(batch, 1, 1) + pndif_cab.unsqueeze(-1)
+        pnuc_cab = transport.absfs.unsqueeze(1) * pnsun_cab.view(batch, 1, 1) + pndif_cab.unsqueeze(-1)
         sunlit_eta_abs = (etau * eta_weights * pnuc_cab).sum(dim=-1)
         shaded_eta_abs = (etah * eta_weights * pndif_cab.unsqueeze(-1)).sum(dim=-1)
 
@@ -562,6 +719,140 @@ class CanopyFluorescenceModel:
         phi_em = self._sample_spectrum(phi, wlP, wlF)
         ep = self._ephoton(wlF).unsqueeze(0)
         return 1e-3 * ep * poutfrc.unsqueeze(-1) * phi_em
+
+    def _prepare_layer_profile(self, value: torch.Tensor | float, transfer: LayeredCanopyTransfer) -> torch.Tensor:
+        batch = transfer.Ps.shape[0]
+        nl = transfer.nlayers
+        device = transfer.Ps.device
+        dtype = transfer.Ps.dtype
+        tensor = torch.as_tensor(value, device=device, dtype=dtype)
+        if tensor.ndim == 0:
+            return tensor.view(1, 1).expand(batch, nl)
+        if tensor.ndim == 1:
+            if tensor.shape[0] == batch:
+                return tensor.view(batch, 1).expand(batch, nl)
+            if tensor.shape[0] == nl:
+                return tensor.view(1, nl).expand(batch, nl)
+        if tensor.ndim == 2:
+            if tensor.shape == (batch, nl):
+                return tensor
+            if tensor.shape == (1, nl):
+                return tensor.expand(batch, nl)
+            if tensor.shape == (batch, 1):
+                return tensor.expand(batch, nl)
+        raise ValueError(f"Layer profiles must broadcast to shape ({batch}, {nl})")
+
+    def _run_leaf_biochemistry(
+        self,
+        *,
+        biochemistry: LeafBiochemistryInputs,
+        Q: torch.Tensor,
+        Cs: torch.Tensor,
+        T: torch.Tensor,
+        eb: torch.Tensor,
+        Oa: torch.Tensor,
+        p: torch.Tensor,
+        fV: torch.Tensor,
+        options: Optional[BiochemicalOptions],
+        target_shape: torch.Size,
+    ) -> LeafBiochemistryResult:
+        flat_inputs = self._flatten_biochemistry_inputs(biochemistry, target_shape)
+        result = self.leaf_biochemistry(
+            flat_inputs,
+            LeafMeteo(
+                Q=Q.reshape(-1),
+                Cs=Cs.reshape(-1),
+                T=T.reshape(-1),
+                eb=eb.reshape(-1),
+                Oa=Oa.reshape(-1),
+                p=p.reshape(-1),
+            ),
+            options=options,
+            fV=fV.reshape(-1),
+        )
+        return self._reshape_biochemistry_result(result, target_shape)
+
+    def _flatten_biochemistry_inputs(
+        self,
+        biochemistry: LeafBiochemistryInputs,
+        target_shape: torch.Size,
+    ) -> LeafBiochemistryInputs:
+        device = self.reflectance_model.fluspect.device
+        dtype = self.reflectance_model.fluspect.dtype
+        numel = int(torch.tensor(target_shape).prod().item())
+
+        def _flatten(value: torch.Tensor | float | None) -> torch.Tensor | None:
+            if value is None:
+                return None
+            tensor = torch.as_tensor(value, device=device, dtype=dtype)
+            if tensor.ndim == 0:
+                return tensor.repeat(numel)
+            if tensor.shape == target_shape:
+                return tensor.reshape(-1)
+            if len(target_shape) == 2:
+                batch, nl = target_shape
+                if tensor.ndim == 1:
+                    if tensor.shape[0] == batch:
+                        return tensor.view(batch, 1).expand(batch, nl).reshape(-1)
+                    if tensor.shape[0] == nl:
+                        return tensor.view(1, nl).expand(batch, nl).reshape(-1)
+                if tensor.ndim == 2:
+                    if tensor.shape == (1, nl):
+                        return tensor.expand(batch, nl).reshape(-1)
+                    if tensor.shape == (batch, 1):
+                        return tensor.expand(batch, nl).reshape(-1)
+            if len(target_shape) == 3:
+                batch, nl, nori = target_shape
+                if tensor.ndim == 1:
+                    if tensor.shape[0] == batch:
+                        return tensor.view(batch, 1, 1).expand(batch, nl, nori).reshape(-1)
+                    if tensor.shape[0] == nl:
+                        return tensor.view(1, nl, 1).expand(batch, nl, nori).reshape(-1)
+                    if tensor.shape[0] == nori:
+                        return tensor.view(1, 1, nori).expand(batch, nl, nori).reshape(-1)
+                if tensor.ndim == 2:
+                    if tensor.shape == (batch, nl):
+                        return tensor.unsqueeze(-1).expand(batch, nl, nori).reshape(-1)
+                    if tensor.shape == (1, nl):
+                        return tensor.view(1, nl, 1).expand(batch, nl, nori).reshape(-1)
+                    if tensor.shape == (batch, 1):
+                        return tensor.view(batch, 1, 1).expand(batch, nl, nori).reshape(-1)
+                    if tensor.shape == (batch, nori):
+                        return tensor.unsqueeze(1).expand(batch, nl, nori).reshape(-1)
+                if tensor.ndim == 3:
+                    if tensor.shape == (batch, nl, nori):
+                        return tensor.reshape(-1)
+                    if tensor.shape == (1, nl, nori):
+                        return tensor.expand(batch, nl, nori).reshape(-1)
+            raise ValueError(f"Leaf biochemistry inputs must broadcast to shape {tuple(target_shape)}")
+
+        return LeafBiochemistryInputs(
+            Vcmax25=_flatten(biochemistry.Vcmax25),
+            BallBerrySlope=_flatten(biochemistry.BallBerrySlope),
+            Type=biochemistry.Type,
+            BallBerry0=_flatten(biochemistry.BallBerry0),
+            RdPerVcmax25=_flatten(biochemistry.RdPerVcmax25),
+            Kn0=_flatten(biochemistry.Kn0),
+            Knalpha=_flatten(biochemistry.Knalpha),
+            Knbeta=_flatten(biochemistry.Knbeta),
+            stressfactor=_flatten(biochemistry.stressfactor),
+            g_m=_flatten(biochemistry.g_m),
+            TDP=biochemistry.TDP,
+        )
+
+    def _reshape_biochemistry_result(
+        self,
+        result: LeafBiochemistryResult,
+        target_shape: torch.Size,
+    ) -> LeafBiochemistryResult:
+        data = {}
+        for field in LeafBiochemistryResult.__dataclass_fields__:
+            value = getattr(result, field)
+            if isinstance(value, torch.Tensor):
+                data[field] = value.reshape(target_shape)
+            else:
+                data[field] = value
+        return LeafBiochemistryResult(**data)
 
     def _prepare_etau(self, etau: Optional[torch.Tensor], transfer: LayeredCanopyTransfer) -> torch.Tensor:
         batch = transfer.Ps.shape[0]

@@ -1,5 +1,6 @@
 import torch
 
+from scope_torch.biochem import LeafBiochemistryInputs
 from scope_torch.canopy.fluorescence import CanopyFluorescenceModel
 from scope_torch.canopy.foursail import FourSAILModel, campbell_lidf, scope_lidf
 from scope_torch.spectral.fluspect import LeafBioBatch
@@ -196,3 +197,77 @@ def test_canopy_fluorescence_layered_accepts_orientation_resolved_efficiencies()
     assert torch.allclose(oriented.LoF_, layer_constant.LoF_, atol=1e-12, rtol=1e-10)
     assert torch.allclose(oriented.EoutF_, layer_constant.EoutF_, atol=1e-12, rtol=1e-10)
     assert torch.allclose(oriented.Femleaves_, layer_constant.Femleaves_, atol=1e-12, rtol=1e-10)
+
+
+def test_canopy_fluorescence_layered_biochemical_matches_manual_eta_path():
+    device = torch.device("cpu")
+    dtype = torch.float64
+    lidf = scope_lidf(0.0, 0.0, device=device, dtype=dtype)
+    model = CanopyFluorescenceModel.from_scope_assets(lidf=lidf, device=device, dtype=dtype)
+
+    leafbio = LeafBioBatch(
+        Cab=torch.tensor([45.0], device=device, dtype=dtype),
+        Cw=torch.tensor([0.01], device=device, dtype=dtype),
+        Cdm=torch.tensor([0.012], device=device, dtype=dtype),
+        fqe=torch.tensor([0.01], device=device, dtype=dtype),
+    )
+    biochem = LeafBiochemistryInputs(
+        Type="C3",
+        Vcmax25=torch.tensor([60.0], device=device, dtype=dtype),
+        BallBerrySlope=torch.tensor([8.0], device=device, dtype=dtype),
+        BallBerry0=torch.tensor([0.01], device=device, dtype=dtype),
+        RdPerVcmax25=torch.tensor([0.015], device=device, dtype=dtype),
+        Kn0=torch.tensor([2.48], device=device, dtype=dtype),
+        Knalpha=torch.tensor([2.83], device=device, dtype=dtype),
+        Knbeta=torch.tensor([0.114], device=device, dtype=dtype),
+        stressfactor=torch.tensor([1.0], device=device, dtype=dtype),
+    )
+    n_wle = model.reflectance_model.fluspect.spectral.wlE.numel()
+    soil = model.reflectance_model.soil_reflectance(soil_spectrum=torch.tensor([1.0], device=device, dtype=dtype))
+    Esun_ = torch.full((1, n_wle), 1.0, device=device, dtype=dtype)
+    Esky_ = torch.full((1, n_wle), 0.2, device=device, dtype=dtype)
+
+    coupled = model.layered_biochemical(
+        leafbio,
+        biochem,
+        soil,
+        torch.tensor([3.0], device=device, dtype=dtype),
+        torch.tensor([30.0], device=device, dtype=dtype),
+        torch.tensor([20.0], device=device, dtype=dtype),
+        torch.tensor([10.0], device=device, dtype=dtype),
+        Esun_,
+        Esky_,
+        Csu=torch.full((1, 4), 390.0, device=device, dtype=dtype),
+        Csh=torch.full((1, 4), 390.0, device=device, dtype=dtype),
+        ebu=torch.full((1, 4), 20.0, device=device, dtype=dtype),
+        ebh=torch.full((1, 4), 20.0, device=device, dtype=dtype),
+        Tcu=torch.full((1, 4), 25.0, device=device, dtype=dtype),
+        Tch=torch.full((1, 4), 23.0, device=device, dtype=dtype),
+        Oa=torch.tensor([209.0], device=device, dtype=dtype),
+        p=torch.tensor([970.0], device=device, dtype=dtype),
+        nlayers=4,
+    )
+    manual = model.layered(
+        leafbio,
+        soil,
+        torch.tensor([3.0], device=device, dtype=dtype),
+        torch.tensor([30.0], device=device, dtype=dtype),
+        torch.tensor([20.0], device=device, dtype=dtype),
+        torch.tensor([10.0], device=device, dtype=dtype),
+        Esun_,
+        Esky_,
+        etau=coupled.sunlit.eta,
+        etah=coupled.shaded.eta,
+        nlayers=4,
+    )
+
+    assert coupled.Pnu_Cab.shape == coupled.sunlit.eta.shape
+    assert coupled.Pnh_Cab.shape == coupled.shaded.eta.shape
+    assert torch.all(coupled.Pnu_Cab >= 0)
+    assert torch.all(coupled.Pnh_Cab >= 0)
+    assert torch.all(coupled.sunlit.A > 0)
+    assert torch.all(coupled.shaded.A > 0)
+    assert torch.allclose(coupled.sunlit.SIF, coupled.sunlit.fs * coupled.Pnu_Cab, atol=1e-12, rtol=1e-10)
+    assert torch.allclose(coupled.shaded.SIF, coupled.shaded.fs * coupled.Pnh_Cab, atol=1e-12, rtol=1e-10)
+    for field in manual.__dataclass_fields__:
+        assert torch.allclose(getattr(coupled.fluorescence, field), getattr(manual, field), atol=1e-12, rtol=1e-10)

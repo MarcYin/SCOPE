@@ -1,3 +1,4 @@
+import pytest
 import torch
 
 from scope_torch.biochem import BiochemicalOptions, LeafBiochemistryInputs, LeafBiochemistryModel, LeafMeteo
@@ -110,3 +111,49 @@ def test_leaf_biochemistry_c4_path_returns_finite_fluxes():
     assert torch.all(torch.isfinite(result.Ci))
     assert torch.all(torch.isfinite(result.eta))
     assert torch.all(result.gs >= 0)
+
+
+def test_leaf_biochemistry_accepts_constant_tensor_type_codes():
+    model = LeafBiochemistryModel(dtype=torch.float64)
+    leafbio, meteo = _make_c3_inputs()
+    leafbio.Type = torch.zeros(2, dtype=torch.float64)
+    meteo = LeafMeteo(
+        Q=torch.tensor([1200.0, 1100.0], dtype=torch.float64),
+        Cs=torch.tensor([390.0, 395.0], dtype=torch.float64),
+        T=torch.tensor([25.0, 24.0], dtype=torch.float64),
+        eb=torch.tensor([20.0, 19.0], dtype=torch.float64),
+        Oa=torch.tensor([209.0, 209.0], dtype=torch.float64),
+        p=torch.tensor([970.0, 970.0], dtype=torch.float64),
+    )
+    leafbio.Vcmax25 = torch.tensor([60.0, 62.0], dtype=torch.float64)
+    leafbio.BallBerrySlope = torch.tensor([8.0, 8.0], dtype=torch.float64)
+    leafbio.BallBerry0 = torch.tensor([0.01, 0.01], dtype=torch.float64)
+    leafbio.RdPerVcmax25 = torch.tensor([0.015, 0.015], dtype=torch.float64)
+    leafbio.Kn0 = torch.tensor([2.48, 2.48], dtype=torch.float64)
+    leafbio.Knalpha = torch.tensor([2.83, 2.83], dtype=torch.float64)
+    leafbio.Knbeta = torch.tensor([0.114, 0.114], dtype=torch.float64)
+    leafbio.stressfactor = torch.tensor([1.0, 1.0], dtype=torch.float64)
+
+    result = model(leafbio, meteo)
+
+    assert result.A.shape == (2,)
+    assert torch.all(result.A > 0)
+
+
+def test_leaf_biochemistry_rejects_mixed_tensor_type_codes():
+    model = LeafBiochemistryModel(dtype=torch.float64)
+    leafbio, meteo = _make_c3_inputs()
+    leafbio.Type = torch.tensor([0.0, 1.0], dtype=torch.float64)
+    meteo = LeafMeteo(
+        Q=torch.tensor([1200.0, 1200.0], dtype=torch.float64),
+        Cs=torch.tensor([390.0, 390.0], dtype=torch.float64),
+        T=torch.tensor([25.0, 25.0], dtype=torch.float64),
+        eb=torch.tensor([20.0, 20.0], dtype=torch.float64),
+        Oa=torch.tensor([209.0, 209.0], dtype=torch.float64),
+        p=torch.tensor([970.0, 970.0], dtype=torch.float64),
+    )
+    leafbio.Vcmax25 = torch.tensor([60.0, 60.0], dtype=torch.float64)
+    leafbio.BallBerrySlope = torch.tensor([8.0, 8.0], dtype=torch.float64)
+
+    with pytest.raises(ValueError, match="mixed C3/C4 batches"):
+        model(leafbio, meteo)

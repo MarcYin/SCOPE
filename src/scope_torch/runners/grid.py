@@ -4,6 +4,7 @@ from typing import Dict, Mapping, Optional
 
 import torch
 
+from ..biochem import BiochemicalOptions, LeafBiochemistryInputs, LeafBiochemistryResult
 from ..canopy.fluorescence import CanopyFluorescenceModel, CanopyFluorescenceResult
 from ..canopy.reflectance import CanopyReflectanceModel, CanopyReflectanceResult
 from ..canopy.thermal import CanopyThermalRadianceModel, CanopyThermalRadianceResult, ThermalOptics
@@ -128,6 +129,72 @@ class ScopeGridRunner:
             )
             for name in outputs:
                 outputs[name].append(getattr(result, name))
+
+        return {name: torch.cat(chunks, dim=0) for name, chunks in outputs.items()}
+
+    def run_biochemical_fluorescence(
+        self,
+        data_module: ScopeGridDataModule,
+        *,
+        varmap: Mapping[str, str],
+        biochem_options: Optional[BiochemicalOptions] = None,
+        hotspot_var: Optional[str] = None,
+        nlayers: Optional[int] = None,
+    ) -> Dict[str, torch.Tensor]:
+        physiology_fields = [name for name in LeafBiochemistryResult.__dataclass_fields__ if name != "fcount"]
+        outputs: dict[str, list[torch.Tensor]] = {
+            **{name: [] for name in CanopyFluorescenceResult.__dataclass_fields__},
+            "Pnu_Cab": [],
+            "Pnh_Cab": [],
+            **{f"sunlit_{name}": [] for name in physiology_fields},
+            **{f"shaded_{name}": [] for name in physiology_fields},
+        }
+        for batch in data_module.iter_batches():
+            leaf_kwargs = self._leafbio_kwargs(batch, varmap)
+            leafbio = LeafBioBatch(**leaf_kwargs)
+            biochem = LeafBiochemistryInputs(**self._biochemistry_kwargs(batch, varmap))
+            lai = batch[varmap["LAI"]]
+            tts = batch[varmap["tts"]]
+            tto = batch[varmap["tto"]]
+            psi = batch[varmap["psi"]]
+            Esun = self._spectral_input(batch, varmap, "Esun_")
+            Esky = self._spectral_input(batch, varmap, "Esky_")
+            soil = self._soil_refl(batch, varmap)
+            if hotspot_var and hotspot_var in batch:
+                hotspot = batch[hotspot_var]
+            else:
+                hotspot = torch.full_like(lai, self.default_hotspot)
+
+            result = self.fluorescence_model.layered_biochemical(
+                leafbio,
+                biochem,
+                soil,
+                lai,
+                tts,
+                tto,
+                psi,
+                Esun,
+                Esky,
+                Csu=batch[varmap["Csu"]],
+                Csh=batch[varmap["Csh"]],
+                ebu=batch[varmap["ebu"]],
+                ebh=batch[varmap["ebh"]],
+                Tcu=batch[varmap["Tcu"]],
+                Tch=batch[varmap["Tch"]],
+                Oa=batch[varmap["Oa"]],
+                p=batch[varmap["p"]],
+                fV=batch[varmap["fV"]] if "fV" in varmap and varmap["fV"] in batch else 1.0,
+                biochem_options=biochem_options,
+                hotspot=hotspot,
+                nlayers=self._layer_count(nlayers, etau=None, etah=None, Tcu=batch[varmap["Tcu"]], Tch=batch[varmap["Tch"]]),
+            )
+            for name in CanopyFluorescenceResult.__dataclass_fields__:
+                outputs[name].append(getattr(result.fluorescence, name))
+            outputs["Pnu_Cab"].append(result.Pnu_Cab)
+            outputs["Pnh_Cab"].append(result.Pnh_Cab)
+            for name in physiology_fields:
+                outputs[f"sunlit_{name}"].append(getattr(result.sunlit, name))
+                outputs[f"shaded_{name}"].append(getattr(result.shaded, name))
 
         return {name: torch.cat(chunks, dim=0) for name, chunks in outputs.items()}
 
@@ -262,6 +329,15 @@ class ScopeGridRunner:
     def _leafbio_kwargs(self, batch: Mapping[str, torch.Tensor], varmap: Mapping[str, str]) -> Dict[str, torch.Tensor]:
         kwargs: Dict[str, torch.Tensor] = {}
         for field in LeafBioBatch.__dataclass_fields__:
+            if field in varmap and varmap[field] in batch:
+                kwargs[field] = batch[varmap[field]]
+        return kwargs
+
+    def _biochemistry_kwargs(self, batch: Mapping[str, torch.Tensor], varmap: Mapping[str, str]) -> Dict[str, torch.Tensor]:
+        kwargs: Dict[str, torch.Tensor] = {}
+        for field in LeafBiochemistryInputs.__dataclass_fields__:
+            if field == "TDP":
+                continue
             if field in varmap and varmap[field] in batch:
                 kwargs[field] = batch[varmap[field]]
         return kwargs

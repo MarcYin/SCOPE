@@ -12,7 +12,7 @@ from .biochem import (
 )
 from .config import SimulationConfig
 from .canopy.foursail import FourSAILModel, FourSAILResult, campbell_lidf, scope_lazitab, scope_lidf, scope_litab
-from .canopy.fluorescence import CanopyFluorescenceModel, CanopyFluorescenceResult
+from .canopy.fluorescence import CanopyBiochemicalFluorescenceResult, CanopyFluorescenceModel, CanopyFluorescenceResult
 from .canopy.layered_rt import LayerFluxProfiles, LayeredCanopyTransfer, LayeredCanopyTransportModel
 from .canopy.reflectance import CanopyReflectanceModel, CanopyReflectanceResult
 from .canopy.thermal import CanopyThermalRadianceModel, CanopyThermalRadianceResult, ThermalOptics, default_thermal_wavelengths
@@ -45,6 +45,7 @@ __all__ = [
     "FourSAILResult",
     "CanopyFluorescenceModel",
     "CanopyFluorescenceResult",
+    "CanopyBiochemicalFluorescenceResult",
     "LayerFluxProfiles",
     "LayeredCanopyTransfer",
     "LayeredCanopyTransportModel",

@@ -268,8 +268,7 @@ class LeafBiochemistryModel:
         Ja = Ag / CO2_per_electron.clamp(min=1e-12)
         rcw = (self.rhoa / (self.Mair * 1e-3)) / gs.clamp(min=1e-12)
 
-        ps = po0 * Ja / Je.clamp(min=1e-12)
-        ps = torch.where(Je.abs() <= 1e-12, po0, ps)
+        ps = torch.where(Je.abs() <= 1e-12, po0, po0 * Ja / Je)
         ps_rel = torch.clamp(1.0 - ps / po0.clamp(min=1e-12), min=0.0)
 
         fluorescence = self._fluorescence_model(ps, ps_rel, Kn0, Knalpha, Knbeta, Kd)
@@ -317,6 +316,16 @@ class LeafBiochemistryModel:
         )
 
     def _normalize_type(self, canopy_type: str | bool) -> str:
+        if isinstance(canopy_type, torch.Tensor):
+            flat = canopy_type.reshape(-1)
+            if flat.numel() == 0:
+                raise ValueError("Leaf biochemistry Type tensor cannot be empty")
+            first = flat[0]
+            if flat.numel() != 1 and not torch.all(flat == first):
+                raise ValueError("Leaf biochemistry does not support mixed C3/C4 batches")
+            canopy_type = float(first.item())
+        if isinstance(canopy_type, (int, float)):
+            return "C4" if canopy_type else "C3"
         if isinstance(canopy_type, bool):
             return "C4" if canopy_type else "C3"
         return "C4" if str(canopy_type).upper() == "C4" else "C3"
