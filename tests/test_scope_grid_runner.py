@@ -4,6 +4,7 @@ import torch
 import xarray as xr
 
 from scope_torch.canopy.foursail import FourSAILModel, campbell_lidf
+from scope_torch.canopy.fluorescence import CanopyFluorescenceModel
 from scope_torch.canopy.reflectance import CanopyReflectanceModel
 from scope_torch.config import SimulationConfig
 from scope_torch.data import ScopeGridDataModule
@@ -131,6 +132,84 @@ def test_scope_grid_runner_matches_manual():
 
     expected_keys = {"leaf_refl", "leaf_tran", *CANOPY_KEYS}
     assert set(outputs) == expected_keys
+    for key, values in manual_outputs.items():
+        assert torch.allclose(outputs[key], torch.cat(values, dim=0))
+
+
+def test_scope_grid_runner_fluorescence_matches_manual():
+    device = torch.device("cpu")
+    dtype = torch.float64
+    lidf = campbell_lidf(57.0, device=device, dtype=dtype)
+    runner = ScopeGridRunner.from_scope_assets(lidf=lidf, device=device, dtype=dtype)
+    n_wle = runner.fluspect.spectral.wlE.numel()
+
+    times = pd.date_range("2020-07-01", periods=2, freq="h")
+    y = np.arange(1)
+    x = np.arange(1)
+    data = xr.Dataset(
+        {
+            "Cab": (("y", "x", "time"), np.full((1, 1, 2), 45.0)),
+            "Cw": (("y", "x", "time"), np.full((1, 1, 2), 0.01)),
+            "Cdm": (("y", "x", "time"), np.full((1, 1, 2), 0.012)),
+            "fqe": (("y", "x", "time"), np.full((1, 1, 2), 0.01)),
+            "LAI": (("y", "x", "time"), np.array([[[2.0, 2.5]]])),
+            "tts": (("y", "x", "time"), np.full((1, 1, 2), 30.0)),
+            "tto": (("y", "x", "time"), np.full((1, 1, 2), 20.0)),
+            "psi": (("y", "x", "time"), np.array([[[5.0, 15.0]]])),
+            "soil_spectrum": (("y", "x", "time"), np.array([[[1.0, 2.0]]])),
+            "excitation": (("y", "x", "time", "excitation_wavelength"), np.full((1, 1, 2, n_wle), 1.0)),
+        },
+        coords={"y": y, "x": x, "time": times, "excitation_wavelength": np.arange(n_wle)},
+    )
+
+    cfg = SimulationConfig(roi_bounds=(0, 0, 1, 1), start_time=times[0], end_time=times[-1], chunk_size=2)
+    module = ScopeGridDataModule(
+        data,
+        cfg,
+        required_vars=["Cab", "Cw", "Cdm", "fqe", "LAI", "tts", "tto", "psi", "soil_spectrum", "excitation"],
+    )
+    outputs = runner.run_fluorescence(
+        module,
+        varmap={
+            "Cab": "Cab",
+            "Cw": "Cw",
+            "Cdm": "Cdm",
+            "fqe": "fqe",
+            "LAI": "LAI",
+            "tts": "tts",
+            "tto": "tto",
+            "psi": "psi",
+            "soil_spectrum": "soil_spectrum",
+            "excitation": "excitation",
+        },
+    )
+
+    fluorescence_model = CanopyFluorescenceModel(runner.reflectance_model)
+    stacked = data.stack(batch=("y", "x", "time"))
+    manual_outputs: dict[str, list[torch.Tensor]] = {key: [] for key in outputs}
+    for label in stacked["Cab"].indexes["batch"]:
+        idx = dict(batch=label)
+        leafbio = LeafBioBatch(
+            Cab=torch.tensor([float(stacked["Cab"].sel(**idx))], device=device, dtype=dtype),
+            Cw=torch.tensor([float(stacked["Cw"].sel(**idx))], device=device, dtype=dtype),
+            Cdm=torch.tensor([float(stacked["Cdm"].sel(**idx))], device=device, dtype=dtype),
+            fqe=torch.tensor([float(stacked["fqe"].sel(**idx))], device=device, dtype=dtype),
+        )
+        soil_idx = torch.tensor([float(stacked["soil_spectrum"].sel(**idx))], device=device, dtype=dtype)
+        excitation = torch.tensor(stacked["excitation"].sel(**idx).values, device=device, dtype=dtype).unsqueeze(0)
+        fluorescence_out = fluorescence_model(
+            leafbio,
+            runner.soil_spectra.batch(soil_idx),
+            torch.tensor([float(stacked["LAI"].sel(**idx))], device=device, dtype=dtype),
+            torch.tensor([float(stacked["tts"].sel(**idx))], device=device, dtype=dtype),
+            torch.tensor([float(stacked["tto"].sel(**idx))], device=device, dtype=dtype),
+            torch.tensor([float(stacked["psi"].sel(**idx))], device=device, dtype=dtype),
+            excitation,
+            hotspot=torch.tensor([runner.default_hotspot], device=device, dtype=dtype),
+        )
+        for key in manual_outputs:
+            manual_outputs[key].append(getattr(fluorescence_out, key))
+
     for key, values in manual_outputs.items():
         assert torch.allclose(outputs[key], torch.cat(values, dim=0))
 

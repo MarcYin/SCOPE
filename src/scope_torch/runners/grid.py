@@ -4,6 +4,7 @@ from typing import Dict, Mapping, Optional
 
 import torch
 
+from ..canopy.fluorescence import CanopyFluorescenceModel, CanopyFluorescenceResult
 from ..canopy.reflectance import CanopyReflectanceModel, CanopyReflectanceResult
 from ..canopy.foursail import FourSAILModel
 from ..spectral.fluspect import FluspectModel, LeafBioBatch
@@ -42,6 +43,7 @@ class ScopeGridRunner:
             soil_bsm=soil_bsm,
             soil_index_base=soil_index_base,
         )
+        self.fluorescence_model = CanopyFluorescenceModel(self.reflectance_model)
 
     @classmethod
     def from_scope_assets(
@@ -127,12 +129,54 @@ class ScopeGridRunner:
 
         return {name: torch.cat(chunks, dim=0) for name, chunks in outputs.items()}
 
+    def run_fluorescence(
+        self,
+        data_module: ScopeGridDataModule,
+        *,
+        varmap: Mapping[str, str],
+        hotspot_var: Optional[str] = None,
+    ) -> Dict[str, torch.Tensor]:
+        outputs: dict[str, list[torch.Tensor]] = {name: [] for name in CanopyFluorescenceResult.__dataclass_fields__}
+        for batch in data_module.iter_batches():
+            leaf_kwargs = self._leafbio_kwargs(batch, varmap)
+            leafbio = LeafBioBatch(**leaf_kwargs)
+            lai = batch[varmap["LAI"]]
+            tts = batch[varmap["tts"]]
+            tto = batch[varmap["tto"]]
+            psi = batch[varmap["psi"]]
+            excitation = self._excitation(batch, varmap)
+            soil = self._soil_refl(batch, varmap)
+            if hotspot_var and hotspot_var in batch:
+                hotspot = batch[hotspot_var]
+            else:
+                hotspot = torch.full_like(lai, self.default_hotspot)
+
+            result = self.fluorescence_model(
+                leafbio,
+                soil,
+                lai,
+                tts,
+                tto,
+                psi,
+                excitation,
+                hotspot=hotspot,
+            )
+            for name in outputs:
+                outputs[name].append(getattr(result, name))
+
+        return {name: torch.cat(chunks, dim=0) for name, chunks in outputs.items()}
+
     def _leafbio_kwargs(self, batch: Mapping[str, torch.Tensor], varmap: Mapping[str, str]) -> Dict[str, torch.Tensor]:
         kwargs: Dict[str, torch.Tensor] = {}
         for field in LeafBioBatch.__dataclass_fields__:
             if field in varmap and varmap[field] in batch:
                 kwargs[field] = batch[varmap[field]]
         return kwargs
+
+    def _excitation(self, batch: Mapping[str, torch.Tensor], varmap: Mapping[str, str]) -> torch.Tensor:
+        if "excitation" not in varmap or varmap["excitation"] not in batch:
+            raise KeyError("varmap must provide 'excitation' for fluorescence runs")
+        return batch[varmap["excitation"]]
 
     def _soil_refl(self, batch: Mapping[str, torch.Tensor], varmap: Mapping[str, str]) -> torch.Tensor:
         if "soil_refl" in varmap and varmap["soil_refl"] in batch:
