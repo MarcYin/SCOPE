@@ -62,6 +62,24 @@ def _make_leafbio(batch: int, device, dtype, *, fqe: float = 0.0) -> LeafBioBatc
     )
 
 
+def test_expint_matches_scipy_and_supports_gradients():
+    device = torch.device("cpu")
+    dtype = torch.float64
+    spectral = _make_spectral(device, dtype)
+    model = FluspectModel(spectral, _make_optipar(spectral), dtype=dtype)
+
+    x = torch.tensor([1e-9, 1e-6, 1e-3, 0.1, 0.5, 1.0, 2.0, 10.0, 100.0], device=device, dtype=dtype, requires_grad=True)
+    y = model._expint(x)
+    expected = torch.from_numpy(exp1(x.detach().cpu().numpy())).to(device=device, dtype=dtype)
+
+    assert torch.allclose(y, expected, atol=1e-12, rtol=1e-10)
+
+    y.sum().backward()
+    expected_grad = -torch.exp(-x.detach()) / x.detach()
+    assert x.grad is not None
+    assert torch.allclose(x.grad, expected_grad, atol=1e-10, rtol=1e-8)
+
+
 def _calctav_np(alfa, nr):
     rd = np.pi / 180.0
     sa = np.sin(alfa * rd)

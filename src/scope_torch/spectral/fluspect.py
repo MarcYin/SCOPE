@@ -5,7 +5,9 @@ from dataclasses import dataclass, fields
 from typing import Optional, Tuple
 
 import torch
-from scipy import special as sp_special
+
+
+_EULER_GAMMA = 0.5772156649015328606
 
 
 @dataclass(slots=True)
@@ -277,8 +279,35 @@ class FluspectModel:
 
     def _expint(self, x: torch.Tensor) -> torch.Tensor:
         x_clamped = torch.clamp(x, min=1e-9)
-        values = torch.from_numpy(sp_special.exp1(x_clamped.detach().cpu().numpy()))
-        return values.to(x_clamped.device, x_clamped.dtype)
+        result = torch.empty_like(x_clamped)
+
+        small = x_clamped <= 1.0
+        if small.any():
+            xs = x_clamped[small]
+            series = torch.zeros_like(xs)
+            term = torch.ones_like(xs)
+            for n in range(1, 21):
+                term = term * (-xs / n)
+                series = series - term / n
+            result[small] = -torch.log(xs) - _EULER_GAMMA + series
+
+        large = ~small
+        if large.any():
+            xl = x_clamped[large]
+            b = xl + 1.0
+            c = torch.full_like(xl, 1e30)
+            d = 1.0 / b
+            h = d.clone()
+            for i in range(1, 101):
+                a = -(i * i)
+                b = b + 2.0
+                d = 1.0 / (a * d + b)
+                c = b + a / c
+                delta = c * d
+                h = h * delta
+            result[large] = h * torch.exp(-xl)
+
+        return result
 
     def _calctav(self, alfa: float, nr: torch.Tensor) -> torch.Tensor:
         rd = math.pi / 180
