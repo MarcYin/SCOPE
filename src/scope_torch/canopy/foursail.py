@@ -7,6 +7,68 @@ from typing import Optional, Tuple
 import torch
 
 
+def scope_litab(*, device: Optional[torch.device] = None, dtype: Optional[torch.dtype] = None) -> torch.Tensor:
+    device = device or torch.device("cpu")
+    dtype = dtype or torch.float64
+    coarse = torch.arange(5.0, 76.0, 10.0, device=device, dtype=dtype)
+    fine = torch.arange(81.0, 90.0, 2.0, device=device, dtype=dtype)
+    return torch.cat([coarse, fine], dim=0)
+
+
+def scope_lazitab(*, device: Optional[torch.device] = None, dtype: Optional[torch.dtype] = None) -> torch.Tensor:
+    device = device or torch.device("cpu")
+    dtype = dtype or torch.float64
+    return torch.arange(5.0, 356.0, 10.0, device=device, dtype=dtype)
+
+
+def scope_lidf(
+    lidfa: float,
+    lidfb: float = 0.0,
+    *,
+    device: Optional[torch.device] = None,
+    dtype: Optional[torch.dtype] = None,
+) -> torch.Tensor:
+    """SCOPE/SAIL leaf-angle distribution using the upstream `leafangles.m` discretization."""
+
+    device = device or torch.device("cpu")
+    dtype = dtype or torch.float64
+    a = torch.as_tensor(lidfa, device=device, dtype=dtype)
+    b = torch.as_tensor(lidfb, device=device, dtype=dtype)
+    if a.ndim != 0 or b.ndim != 0:
+        raise ValueError("scope_lidf expects scalar lidfa/lidfb values")
+
+    def dcum(theta_deg: float) -> torch.Tensor:
+        theta = torch.as_tensor(theta_deg, device=device, dtype=dtype)
+        rd = torch.pi / 180.0
+        if bool((a > 1).item()):
+            return 1.0 - torch.cos(theta * rd)
+
+        eps = torch.as_tensor(1e-8, device=device, dtype=dtype)
+        x = 2.0 * rd * theta
+        theta2 = x.clone()
+        delx = torch.as_tensor(1.0, device=device, dtype=dtype)
+        y = torch.zeros_like(x)
+        while bool((delx > eps).item()):
+            y = a * torch.sin(x) + 0.5 * b * torch.sin(2.0 * x)
+            dx = 0.5 * (y - x + theta2)
+            x = x + dx
+            delx = torch.abs(dx)
+        return (2.0 * y + theta2) / torch.pi
+
+    F = torch.zeros(13, device=device, dtype=dtype)
+    for idx in range(8):
+        F[idx] = dcum((idx + 1) * 10.0)
+    for idx in range(8, 12):
+        F[idx] = dcum(80.0 + (idx - 7) * 2.0)
+    F[-1] = 1.0
+
+    lidf = torch.zeros_like(F)
+    lidf[0] = F[0]
+    lidf[1:] = F[1:] - F[:-1]
+    lidf = torch.clamp(lidf, min=0.0)
+    return lidf / lidf.sum().clamp(min=1e-12)
+
+
 def campbell_lidf(alpha: float, n_elements: int = 18, *, device: Optional[torch.device] = None, dtype: Optional[torch.dtype] = None) -> torch.Tensor:
     """Compute an ellipsoidal leaf inclination distribution (Campbell, 1990).
 
@@ -85,12 +147,21 @@ class FourSAILResult:
 class FourSAILModel:
     """PyTorch translation of the 4-stream canopy model (SAILh)."""
 
-    def __init__(self, lidf: Optional[torch.Tensor] = None, n_angles: int = 18) -> None:
+    def __init__(self, lidf: Optional[torch.Tensor] = None, n_angles: int = 18, *, litab: Optional[torch.Tensor] = None) -> None:
         self.default_lidf = lidf
-        self.n_angles = lidf.shape[-1] if lidf is not None else n_angles
-        step = 90.0 / self.n_angles
-        centers = torch.linspace(step / 2.0, 90.0 - step / 2.0, self.n_angles)
-        self._litab = centers
+        if litab is not None:
+            self._litab = torch.as_tensor(litab, dtype=torch.float64)
+            self.n_angles = int(self._litab.numel())
+            if lidf is not None and int(lidf.shape[-1]) != self.n_angles:
+                raise ValueError("litab and lidf must have matching angle counts")
+            return
+
+        self.n_angles = int(lidf.shape[-1]) if lidf is not None else n_angles
+        if self.n_angles == 13:
+            self._litab = scope_litab(dtype=torch.float64)
+        else:
+            step = 90.0 / self.n_angles
+            self._litab = torch.linspace(step / 2.0, 90.0 - step / 2.0, self.n_angles, dtype=torch.float64)
 
     def __call__(
         self,

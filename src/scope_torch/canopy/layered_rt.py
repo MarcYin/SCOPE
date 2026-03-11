@@ -1,11 +1,13 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from functools import lru_cache
 from typing import Optional
 
+import numpy as np
 import torch
 
-from .foursail import FourSAILModel
+from .foursail import FourSAILModel, scope_lazitab
 
 
 @dataclass(slots=True)
@@ -40,6 +42,7 @@ class LayeredCanopyTransfer:
     vb: torch.Tensor
     vf: torch.Tensor
     w: torch.Tensor
+    fs: torch.Tensor
     absfs: torch.Tensor
     absfo: torch.Tensor
     fsfo: torch.Tensor
@@ -151,7 +154,7 @@ class LayeredCanopyTransportModel:
         Pso = torch.minimum(Pso, Po)
         Pso = torch.minimum(Pso, Ps)
 
-        absfs, absfo, fsfo, foctl, fsctl, ctl2, lidf_azimuth = self._orientation_factors(
+        fs, absfs, absfo, fsfo, foctl, fsctl, ctl2, lidf_azimuth = self._orientation_factors(
             tts=tts,
             tto=tto,
             psi=psi,
@@ -184,6 +187,7 @@ class LayeredCanopyTransportModel:
             vb=vb,
             vf=vf,
             w=w,
+            fs=fs,
             absfs=absfs,
             absfo=absfo,
             fsfo=fsfo,
@@ -227,12 +231,12 @@ class LayeredCanopyTransportModel:
         dso: torch.Tensor,
         xl: torch.Tensor,
         dx: torch.Tensor,
-        n_samples: int = 32,
+        quadrature_order: int = 64,
     ) -> torch.Tensor:
         device = ko.device
         dtype = ko.dtype
-        samples = (torch.arange(n_samples, device=device, dtype=dtype) + 0.5) / n_samples
-        y = (xl - dx).unsqueeze(-1) + samples.unsqueeze(0).unsqueeze(0) * dx
+        lower = (xl - dx).view(1, -1, 1)
+        upper = xl.view(1, -1, 1)
 
         ko_b = ko.unsqueeze(-1).unsqueeze(-1)
         ks_b = ks.unsqueeze(-1).unsqueeze(-1)
@@ -245,15 +249,22 @@ class LayeredCanopyTransportModel:
         active = ~same_path
         alf[active] = (dso_b[active] / hotspot_b[active]) * 2.0 / (ks_b[active] + ko_b[active]).clamp(min=1e-9)
 
-        pso = torch.empty((ko.shape[0], xl.numel(), n_samples), device=device, dtype=dtype)
+        pso = torch.empty((ko.shape[0], xl.numel()), device=device, dtype=dtype)
+        sqrt_kk = torch.sqrt((ko_b * ks_b).clamp(min=0.0))
         if same_path.any():
-            pso_same = torch.exp((ko_b + ks_b) * lai_b * y - torch.sqrt((ko_b * ks_b).clamp(min=0.0)) * lai_b * y)
-            pso[same_path.expand_as(pso_same)] = pso_same[same_path.expand_as(pso_same)]
+            rate = ((ko_b + ks_b) - sqrt_kk) * lai_b
+            pso_same = self._exp_interval_average(rate, lower, upper).squeeze(-1)
+            pso = torch.where(same_path.expand(-1, xl.numel(), 1).squeeze(-1), pso_same, pso)
         if active.any():
+            nodes, weights = self._gauss_legendre(order=quadrature_order, device=device, dtype=dtype)
+            midpoint = 0.5 * (upper + lower)
+            half_width = 0.5 * (upper - lower)
+            y = midpoint + half_width * nodes.view(1, 1, -1)
             exp_term = torch.exp(y * alf)
-            pso_active = torch.exp((ko_b + ks_b) * lai_b * y + torch.sqrt((ko_b * ks_b).clamp(min=0.0)) * lai_b / alf * (1.0 - exp_term))
-            pso[active.expand_as(pso_active)] = pso_active[active.expand_as(pso_active)]
-        return pso.mean(dim=-1)
+            exponent = (ko_b + ks_b) * lai_b * y + sqrt_kk * lai_b / alf * (1.0 - exp_term)
+            pso_active = 0.5 * torch.sum(weights.view(1, 1, -1) * torch.exp(exponent), dim=-1)
+            pso = torch.where(active.expand(-1, xl.numel(), 1).squeeze(-1), pso_active, pso)
+        return pso
 
     def _orientation_factors(
         self,
@@ -264,7 +275,7 @@ class LayeredCanopyTransportModel:
         litab: torch.Tensor,
         lazitab: torch.Tensor,
         lidf: torch.Tensor,
-    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
         device = tts.device
         dtype = tts.dtype
         batch = tts.shape[0]
@@ -285,6 +296,7 @@ class LayeredCanopyTransportModel:
         cdo = cos_ttli * cos_tto + sin_ttli * sin_tto * cos_philo
         fs = cds / cos_tts.clamp(min=1e-9)
         fo = cdo / cos_tto.clamp(min=1e-9)
+        fs_flat = fs.reshape(batch, ninc * nazi)
         absfs = fs.abs().reshape(batch, ninc * nazi)
         absfo = fo.abs().reshape(batch, ninc * nazi)
         fsfo = (fs * fo).reshape(batch, ninc * nazi)
@@ -292,9 +304,30 @@ class LayeredCanopyTransportModel:
         fsctl = (fs * cos_ttli).reshape(batch, ninc * nazi)
         ctl2 = (cos_ttli**2).expand(batch, -1, nazi).reshape(batch, ninc * nazi)
         lidf_azimuth = (lidf / float(nazi)).unsqueeze(-1).expand(-1, -1, nazi).reshape(batch, ninc * nazi)
-        return absfs, absfo, fsfo, foctl, fsctl, ctl2, lidf_azimuth
+        return fs_flat, absfs, absfo, fsfo, foctl, fsctl, ctl2, lidf_azimuth
 
     def _lazitab(self, *, device: torch.device, dtype: torch.dtype) -> torch.Tensor:
         if self.default_lazitab is not None:
             return torch.as_tensor(self.default_lazitab, device=device, dtype=dtype)
-        return torch.arange(5.0, 356.0, 10.0, device=device, dtype=dtype)
+        return scope_lazitab(device=device, dtype=dtype)
+
+    def _exp_interval_average(self, rate: torch.Tensor, lower: torch.Tensor, upper: torch.Tensor) -> torch.Tensor:
+        span = upper - lower
+        scaled = rate * span
+        midpoint = 0.5 * (lower + upper)
+        denom = torch.where(torch.abs(scaled) <= 1e-12, torch.ones_like(scaled), scaled)
+        exact = torch.exp(rate * lower) * torch.expm1(scaled) / denom
+        limit = torch.exp(rate * midpoint)
+        return torch.where(torch.abs(scaled) <= 1e-9, limit, exact)
+
+    @staticmethod
+    @lru_cache(maxsize=None)
+    def _gauss_legendre_numpy(order: int) -> tuple[np.ndarray, np.ndarray]:
+        nodes, weights = np.polynomial.legendre.leggauss(order)
+        return nodes.astype(np.float64), weights.astype(np.float64)
+
+    def _gauss_legendre(self, *, order: int, device: torch.device, dtype: torch.dtype) -> tuple[torch.Tensor, torch.Tensor]:
+        nodes_np, weights_np = self._gauss_legendre_numpy(order)
+        nodes = torch.as_tensor(nodes_np, device=device, dtype=dtype)
+        weights = torch.as_tensor(weights_np, device=device, dtype=dtype)
+        return nodes, weights
