@@ -200,3 +200,92 @@ def test_scope_grid_runner_from_scope_assets_resolves_soil_spectrum():
 
     for key, values in manual_outputs.items():
         assert torch.allclose(outputs[key], torch.cat(values, dim=0))
+
+
+def test_scope_grid_runner_from_scope_assets_resolves_bsm_soil_parameters():
+    device = torch.device("cpu")
+    dtype = torch.float64
+    lidf = campbell_lidf(57.0, device=device, dtype=dtype)
+    runner = ScopeGridRunner.from_scope_assets(lidf=lidf, device=device, dtype=dtype)
+
+    times = pd.date_range("2020-07-01", periods=2, freq="h")
+    y = np.arange(1)
+    x = np.arange(1)
+    data = xr.Dataset(
+        {
+            "Cab": (("y", "x", "time"), np.full((1, 1, 2), 45.0)),
+            "Cw": (("y", "x", "time"), np.full((1, 1, 2), 0.01)),
+            "Cdm": (("y", "x", "time"), np.full((1, 1, 2), 0.012)),
+            "LAI": (("y", "x", "time"), np.array([[[2.0, 2.5]]])),
+            "tts": (("y", "x", "time"), np.full((1, 1, 2), 30.0)),
+            "tto": (("y", "x", "time"), np.full((1, 1, 2), 20.0)),
+            "psi": (("y", "x", "time"), np.array([[[5.0, 15.0]]])),
+            "BSMBrightness": (("y", "x", "time"), np.array([[[0.5, 0.8]]])),
+            "BSMlat": (("y", "x", "time"), np.array([[[25.0, 35.0]]])),
+            "BSMlon": (("y", "x", "time"), np.array([[[45.0, 60.0]]])),
+            "SMC": (("y", "x", "time"), np.array([[[0.10, 0.25]]])),
+        },
+        coords={"y": y, "x": x, "time": times},
+    )
+
+    cfg = SimulationConfig(roi_bounds=(0, 0, 1, 1), start_time=times[0], end_time=times[-1], chunk_size=2)
+    module = ScopeGridDataModule(
+        data,
+        cfg,
+        required_vars=["Cab", "Cw", "Cdm", "LAI", "tts", "tto", "psi", "BSMBrightness", "BSMlat", "BSMlon", "SMC"],
+    )
+    outputs = runner.run(
+        module,
+        varmap={
+            "Cab": "Cab",
+            "Cw": "Cw",
+            "Cdm": "Cdm",
+            "LAI": "LAI",
+            "tts": "tts",
+            "tto": "tto",
+            "psi": "psi",
+            "BSMBrightness": "BSMBrightness",
+            "BSMlat": "BSMlat",
+            "BSMlon": "BSMlon",
+            "SMC": "SMC",
+        },
+    )
+
+    reflectance_model = CanopyReflectanceModel(
+        runner.fluspect,
+        runner.sail,
+        lidf=lidf,
+        default_hotspot=runner.default_hotspot,
+        soil_spectra=runner.soil_spectra,
+        soil_bsm=runner.soil_bsm,
+        soil_index_base=runner.soil_index_base,
+    )
+    stacked = data.stack(batch=("y", "x", "time"))
+    manual_outputs: dict[str, list[torch.Tensor]] = {"leaf_refl": [], "leaf_tran": [], **{key: [] for key in CANOPY_KEYS}}
+    for label in stacked["Cab"].indexes["batch"]:
+        idx = dict(batch=label)
+        leafbio = LeafBioBatch(
+            Cab=torch.tensor([float(stacked["Cab"].sel(**idx))], device=device, dtype=dtype),
+            Cw=torch.tensor([float(stacked["Cw"].sel(**idx))], device=device, dtype=dtype),
+            Cdm=torch.tensor([float(stacked["Cdm"].sel(**idx))], device=device, dtype=dtype),
+        )
+        soil_tensor = reflectance_model.soil_reflectance(
+            BSMBrightness=torch.tensor([float(stacked["BSMBrightness"].sel(**idx))], device=device, dtype=dtype),
+            BSMlat=torch.tensor([float(stacked["BSMlat"].sel(**idx))], device=device, dtype=dtype),
+            BSMlon=torch.tensor([float(stacked["BSMlon"].sel(**idx))], device=device, dtype=dtype),
+            SMC=torch.tensor([float(stacked["SMC"].sel(**idx))], device=device, dtype=dtype),
+        )
+        reflectance_out = reflectance_model(
+            leafbio,
+            soil_tensor,
+            torch.tensor([float(stacked["LAI"].sel(**idx))], device=device, dtype=dtype),
+            torch.tensor([float(stacked["tts"].sel(**idx))], device=device, dtype=dtype),
+            torch.tensor([float(stacked["tto"].sel(**idx))], device=device, dtype=dtype),
+            torch.tensor([float(stacked["psi"].sel(**idx))], device=device, dtype=dtype),
+            hotspot=torch.tensor([runner.default_hotspot], device=device, dtype=dtype),
+        )
+        for key in manual_outputs:
+            manual_outputs[key].append(getattr(reflectance_out, key))
+
+    for key, values in manual_outputs.items():
+        assert torch.allclose(outputs[key], torch.cat(values, dim=0))

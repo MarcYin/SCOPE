@@ -7,7 +7,8 @@ import torch
 from ..canopy.reflectance import CanopyReflectanceModel, CanopyReflectanceResult
 from ..canopy.foursail import FourSAILModel
 from ..spectral.fluspect import FluspectModel, LeafBioBatch
-from ..spectral.loaders import SoilSpectraLibrary, load_soil_spectra
+from ..spectral.loaders import SoilSpectraLibrary, load_fluspect_resources, load_soil_spectra
+from ..spectral.soil import SoilBSMModel, SoilEmpiricalParams
 from ..data import ScopeGridDataModule
 
 
@@ -22,6 +23,7 @@ class ScopeGridRunner:
         lidf: torch.Tensor,
         default_hotspot: float = 0.2,
         soil_spectra: Optional[SoilSpectraLibrary] = None,
+        soil_bsm: Optional[SoilBSMModel] = None,
         soil_index_base: int = 1,
     ) -> None:
         self.fluspect = fluspect
@@ -29,12 +31,16 @@ class ScopeGridRunner:
         self.lidf = lidf
         self.default_hotspot = default_hotspot
         self.soil_spectra = soil_spectra
+        self.soil_bsm = soil_bsm
         self.soil_index_base = soil_index_base
         self.reflectance_model = CanopyReflectanceModel(
             fluspect,
             sail,
             lidf=lidf,
             default_hotspot=default_hotspot,
+            soil_spectra=soil_spectra,
+            soil_bsm=soil_bsm,
+            soil_index_base=soil_index_base,
         )
 
     @classmethod
@@ -52,14 +58,21 @@ class ScopeGridRunner:
         doublings_step: int = 5,
         default_hotspot: float = 0.2,
         soil_index_base: int = 1,
+        soil_empirical: SoilEmpiricalParams | None = None,
     ) -> "ScopeGridRunner":
-        fluspect = FluspectModel.from_scope_assets(
+        resources = load_fluspect_resources(
             fluspect_path,
             scope_root_path=scope_root_path,
             device=device,
             dtype=dtype,
+        )
+        fluspect = FluspectModel(
+            resources.spectral,
+            resources.optipar,
             ndub=ndub,
             doublings_step=doublings_step,
+            device=torch.device(device) if device is not None else resources.optipar.Kw.device,
+            dtype=dtype,
         )
         soil_spectra = load_soil_spectra(
             soil_path,
@@ -67,6 +80,7 @@ class ScopeGridRunner:
             device=fluspect.device,
             dtype=fluspect.dtype,
         )
+        soil_bsm = SoilBSMModel.from_resources(resources, empirical=soil_empirical, device=fluspect.device, dtype=fluspect.dtype)
         sail_model = sail if sail is not None else FourSAILModel(lidf=lidf)
         return cls(
             fluspect,
@@ -74,6 +88,7 @@ class ScopeGridRunner:
             lidf=lidf,
             default_hotspot=default_hotspot,
             soil_spectra=soil_spectra,
+            soil_bsm=soil_bsm,
             soil_index_base=soil_index_base,
         )
 
@@ -121,9 +136,16 @@ class ScopeGridRunner:
 
     def _soil_refl(self, batch: Mapping[str, torch.Tensor], varmap: Mapping[str, str]) -> torch.Tensor:
         if "soil_refl" in varmap and varmap["soil_refl"] in batch:
-            return batch[varmap["soil_refl"]]
+            return self.reflectance_model.soil_reflectance(soil_refl=batch[varmap["soil_refl"]])
         if "soil_spectrum" in varmap and varmap["soil_spectrum"] in batch:
-            if self.soil_spectra is None:
-                raise ValueError("soil_spectrum was provided but no soil spectra library is configured")
-            return self.soil_spectra.batch(batch[varmap["soil_spectrum"]], index_base=self.soil_index_base)
-        raise KeyError("varmap must provide either 'soil_refl' or 'soil_spectrum'")
+            return self.reflectance_model.soil_reflectance(soil_spectrum=batch[varmap["soil_spectrum"]])
+
+        bsm_fields = ("BSMBrightness", "BSMlat", "BSMlon", "SMC")
+        if all(field in varmap and varmap[field] in batch for field in bsm_fields):
+            return self.reflectance_model.soil_reflectance(
+                BSMBrightness=batch[varmap["BSMBrightness"]],
+                BSMlat=batch[varmap["BSMlat"]],
+                BSMlon=batch[varmap["BSMlon"]],
+                SMC=batch[varmap["SMC"]],
+            )
+        raise KeyError("varmap must provide either 'soil_refl', 'soil_spectrum', or all BSM soil parameter keys")
