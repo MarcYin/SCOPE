@@ -1,0 +1,31 @@
+[build-system]
+requires = ["setuptools>=69", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "scope-torch"
+version = "0.1.0"
+description = "PyTorch reimplementation of the SCOPE radiative transfer model."
+readme = "README.md"
+authors = [{name = "Marc Yin", email = "marc.yin@example.com"}]
+license = {text = "GPL-3.0"}
+requires-python = ">=3.10"
+dependencies = [
+    "torch>=2.2",
+    "numpy>=1.26",
+    "scipy>=1.11",
+    "xarray>=2024.1",
+    "rioxarray>=0.15",
+    "pandas>=2.2"
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8.1",
+    "pytest-cov>=4.1",
+    "rich>=13.7"
+]
+
+[tool.pytest.ini_options]
+addopts = "-ra"
+testpaths = ["tests"]
