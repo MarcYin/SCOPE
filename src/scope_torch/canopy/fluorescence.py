@@ -977,9 +977,56 @@ class CanopyFluorescenceModel:
     def _matlab_spline_interp1(self, source_x: torch.Tensor, source_y: torch.Tensor, target_x: torch.Tensor) -> torch.Tensor:
         if source_x.numel() == target_x.numel() and torch.allclose(source_x, target_x):
             return source_y
-        # Keep the public fluorescence path differentiable and device-native when
-        # callers provide custom excitation or emission grids.
-        return self._interp1d(source_x, source_y, target_x)
+        source_x = source_x.to(self.reflectance_model.fluspect.device, self.reflectance_model.fluspect.dtype).contiguous()
+        source_y = source_y.to(self.reflectance_model.fluspect.device, self.reflectance_model.fluspect.dtype).contiguous()
+        target_x = target_x.to(self.reflectance_model.fluspect.device, self.reflectance_model.fluspect.dtype).contiguous()
+        if source_x.numel() < 4:
+            return self._interp1d(source_x, source_y, target_x)
+
+        h = source_x[1:] - source_x[:-1]
+        n = source_x.numel()
+
+        system = torch.zeros((n, n), device=source_x.device, dtype=source_x.dtype)
+        rhs = torch.zeros((*source_y.shape[:-1], n), device=source_y.device, dtype=source_y.dtype)
+
+        system[0, 0] = -h[1]
+        system[0, 1] = h[0] + h[1]
+        system[0, 2] = -h[0]
+        system[-1, -3] = h[-1]
+        system[-1, -2] = -(h[-2] + h[-1])
+        system[-1, -1] = h[-2]
+
+        slopes = (source_y[..., 1:] - source_y[..., :-1]) / h.view(*([1] * (source_y.ndim - 1)), -1)
+        rhs[..., 1:-1] = 6.0 * (slopes[..., 1:] - slopes[..., :-1])
+
+        for row in range(1, n - 1):
+            system[row, row - 1] = h[row - 1]
+            system[row, row] = 2.0 * (h[row - 1] + h[row])
+            system[row, row + 1] = h[row]
+
+        second = torch.linalg.solve(system, rhs.reshape(-1, n).transpose(0, 1)).transpose(0, 1).reshape(rhs.shape)
+
+        idx = torch.bucketize(target_x, source_x) - 1
+        idx = idx.clamp(0, n - 2)
+        x0 = source_x[idx]
+        x1 = source_x[idx + 1]
+        h_eval = x1 - x0
+        left = (x1 - target_x) / h_eval
+        right = (target_x - x0) / h_eval
+
+        expand_idx = idx.view(*([1] * (source_y.ndim - 1)), -1).expand(*source_y.shape[:-1], -1)
+        y0 = source_y.gather(-1, expand_idx)
+        y1 = source_y.gather(-1, expand_idx + 1)
+        m0 = second.gather(-1, expand_idx)
+        m1 = second.gather(-1, expand_idx + 1)
+        h_batch = h_eval.view(*([1] * (source_y.ndim - 1)), -1)
+
+        return (
+            m0 * (left.view(*([1] * (source_y.ndim - 1)), -1) ** 3) * h_batch**2 / 6.0
+            + m1 * (right.view(*([1] * (source_y.ndim - 1)), -1) ** 3) * h_batch**2 / 6.0
+            + (y0 - m0 * h_batch**2 / 6.0) * left.view(*([1] * (source_y.ndim - 1)), -1)
+            + (y1 - m1 * h_batch**2 / 6.0) * right.view(*([1] * (source_y.ndim - 1)), -1)
+        )
 
     def _scope_sigmaf(self, LoF: torch.Tensor, EoutFrc: torch.Tensor, wlF: torch.Tensor) -> torch.Tensor:
         raw = (LoF * torch.pi) / EoutFrc.clamp(min=1e-12)

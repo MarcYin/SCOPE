@@ -1,4 +1,5 @@
 import torch
+from scipy.interpolate import CubicSpline
 
 from scope_torch.biochem import LeafBiochemistryInputs
 from scope_torch.canopy.fluorescence import CanopyFluorescenceModel
@@ -208,6 +209,37 @@ def test_canopy_fluorescence_layered_preserves_gradients_on_custom_output_grids(
     assert Esun_.grad is not None
     assert torch.all(torch.isfinite(Esun_.grad))
     assert torch.count_nonzero(Esun_.grad) > 0
+
+
+def test_canopy_fluorescence_matlab_spline_matches_not_a_knot_reference():
+    device = torch.device("cpu")
+    dtype = torch.float64
+    lidf = campbell_lidf(57.0, device=device, dtype=dtype)
+    model = CanopyFluorescenceModel.from_scope_assets(lidf=lidf, device=device, dtype=dtype)
+
+    source_x = torch.arange(640.0, 849.0, 4.0, device=device, dtype=dtype)
+    target_x = torch.arange(640.0, 851.0, 1.0, device=device, dtype=dtype)
+    source_y = torch.stack(
+        [
+            torch.sin(source_x / 35.0) + 0.1 * torch.cos(source_x / 21.0),
+            torch.cos(source_x / 42.0) - 0.05 * torch.sin(source_x / 18.0),
+        ],
+        dim=0,
+    )
+
+    result = model._matlab_spline_interp1(source_x, source_y, target_x)
+    reference = torch.as_tensor(
+        CubicSpline(
+            source_x.cpu().numpy(),
+            source_y.cpu().numpy(),
+            axis=-1,
+            bc_type="not-a-knot",
+        )(target_x.cpu().numpy()),
+        device=device,
+        dtype=dtype,
+    )
+
+    assert torch.allclose(result, reference, atol=1e-10, rtol=1e-10)
 
 
 def test_canopy_fluorescence_layered_accepts_orientation_resolved_efficiencies():

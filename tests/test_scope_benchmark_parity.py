@@ -47,6 +47,13 @@ def test_scope_benchmark_locked_subsystems(tmp_path):
     for name in ("MpluEsun", "MminEsun", "piLs", "piLd", "Femmin", "Femplu", "Fmin_", "Fplu_"):
         assert fluorescence_source[name]["max_rel"] < 1e-9
 
+    fluorescence_transport = report["fluorescence_transport"]
+    assert fluorescence_transport["PoutFrc"]["max_rel"] < 1e-9
+    for name in ("LoF_", "EoutF_", "Femleaves_", "LoF_sunlit", "LoF_shaded", "LoF_scattered", "LoF_soil"):
+        assert fluorescence_transport[name]["max_rel"] < 1e-9
+    for name in ("EoutFrc_", "sigmaF"):
+        assert fluorescence_transport[name]["max_rel"] < 5e-5
+
     resistances = report["resistances_direct"]
     for name in ("ustar", "Kh", "rai", "rar", "rac", "rws", "raa", "raws"):
         assert resistances[name]["max_rel"] < 5e-3
