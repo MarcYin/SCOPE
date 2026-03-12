@@ -40,6 +40,7 @@ from .energy import (
     saturated_vapor_pressure,
     slope_saturated_vapor_pressure,
 )
+from .io import DEFAULT_SCOPE_OPTIONS, ScopeInputFiles, derive_observation_time_grid, prepare_scope_input_dataset, read_s2_bio_inputs
 from .spectral.fluspect import FluspectModel, LeafBioBatch, LeafOptics, OptiPar, SpectralGrids
 from .spectral.loaders import FluspectResources, SoilSpectraLibrary, load_fluspect_resources, load_scope_filenames, load_soil_spectra
 from .spectral.soil import BSMSoilParameters, SoilBSMModel, SoilEmpiricalParams
@@ -86,6 +87,7 @@ __all__ = [
     "EnergyBalanceMeteo",
     "EnergyBalanceOptions",
     "EnergyBalanceSoil",
+    "DEFAULT_SCOPE_OPTIONS",
     "ThermalOptics",
     "HeatFluxInputs",
     "HeatFluxResult",
@@ -97,6 +99,10 @@ __all__ = [
     "slope_saturated_vapor_pressure",
     "campbell_lidf",
     "default_thermal_wavelengths",
+    "derive_observation_time_grid",
+    "prepare_scope_input_dataset",
+    "read_s2_bio_inputs",
+    "ScopeInputFiles",
     "scope_lazitab",
     "scope_lidf",
     "scope_litab",
