@@ -52,13 +52,12 @@ def _reference_resistances(inputs: ResistanceInputs) -> dict[str, torch.Tensor]:
             return -5 * zz / L
         return torch.tensor(0.0, dtype=torch.float64)
 
-    x_zr = torch.ones_like(L) if not bool(unst.item()) else (1 - 16 * zr / L) ** 0.25
     pm_z = psim(z - d)
     ph_z = psih(z - d, x)
     pm_h = psim(h - d)
-    ph_zr = psih(zr - d, x_zr) if bool((z >= zr).item()) else ph_z
-    phs_zr = phstar(zr, x_zr)
-    phs_h = phstar(h, x_zr)
+    ph_zr = psih(zr - d, x) if bool((z >= zr).item()) else ph_z
+    phs_zr = phstar(zr, x)
+    phs_h = phstar(h, x)
 
     ustar = max(0.001, float(kappa * u / (torch.log((z - d) / z0m) - pm_z)))
     ustar = torch.tensor(ustar, dtype=torch.float64)
@@ -75,11 +74,11 @@ def _reference_resistances(inputs: ResistanceInputs) -> dict[str, torch.Tensor]:
 
     rai = ((torch.log((z - d) / (zr - d)) - ph_z + ph_zr) / (kappa * ustar)) if bool((z > zr).item()) else torch.tensor(0.0, dtype=torch.float64)
     rar = 1 / (kappa * ustar) * ((zr - h) / (zr - d)) - phs_zr + phs_h
-    rac = h * torch.sinh(n) / (n * Kh) * (
+    rac = h * torch.sinh(n) / (n * Kh_base) * (
         torch.log((torch.exp(n) - 1) / (torch.exp(n) + 1))
         - torch.log((torch.exp(n * (z0m + d) / h) - 1) / (torch.exp(n * (z0m + d) / h) + 1))
     )
-    rws = h * torch.sinh(n) / (n * Kh) * (
+    rws = h * torch.sinh(n) / (n * Kh_base) * (
         torch.log((torch.exp(n * (z0m + d) / h) - 1) / (torch.exp(n * (z0m + d) / h) + 1))
         - torch.log((torch.exp(n * 0.01 / h) - 1) / (torch.exp(n * 0.01 / h) + 1))
     )

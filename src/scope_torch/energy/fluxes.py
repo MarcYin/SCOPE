@@ -110,14 +110,11 @@ def aerodynamic_resistances(
     pm_z = _psim(z - d, L, unst, st, x)
     ph_z = _psih(z - d, L, unst, st, x)
     pm_h = _psim(h - d, L, unst, st, x)
-    x_zr = torch.where(
-        unst,
-        torch.pow((1.0 - 16.0 * zr / L).clamp(min=1e-12), 0.25),
-        torch.ones_like(L),
-    )
-    ph_zr = torch.where(z >= zr, _psih(zr - d, L, unst, st, x_zr), ph_z)
-    phs_zr = _phstar(zr, zr, d, L, st, unst, x_zr)
-    phs_h = _phstar(h, zr, d, L, st, unst, x_zr)
+    # Match upstream SCOPE `resistances.m`: the same unstable-stability `x`
+    # derived from measurement height is reused in all correction terms.
+    ph_zr = torch.where(z >= zr, _psih(zr - d, L, unst, st, x), ph_z)
+    phs_zr = _phstar(zr, zr, d, L, st, unst, x)
+    phs_h = _phstar(h, zr, d, L, st, unst, x)
 
     ustar = torch.maximum(
         torch.full_like(u, 0.001),
@@ -137,7 +134,9 @@ def aerodynamic_resistances(
     uz0 = uh * torch.exp(n * (((z0m + d) / h) - 1.0))
 
     sinh_n = torch.sinh(n)
-    denom = (n * Kh).clamp(min=1e-12)
+    # Match upstream SCOPE `resistances.m`: canopy resistances use the base
+    # Kh prior to the exported stability correction.
+    denom = (n * Kh_base).clamp(min=1e-12)
     exp_top = torch.exp(n)
     exp_z0 = torch.exp(n * (z0m + d) / h)
     exp_soil = torch.exp(n * 0.01 / h)

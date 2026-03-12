@@ -50,6 +50,28 @@ class CanopyBiochemicalFluorescenceResult:
     Pnh_Cab: torch.Tensor
 
 
+@dataclass(slots=True)
+class _LayeredFluorescenceDiagnostics:
+    leaf_fluor_back: torch.Tensor
+    leaf_fluor_forw: torch.Tensor
+    MpluEsun: torch.Tensor
+    MminEsun: torch.Tensor
+    piLs: torch.Tensor
+    piLd: torch.Tensor
+    Femmin: torch.Tensor
+    Femplu: torch.Tensor
+    Fmin_: torch.Tensor
+    Fplu_: torch.Tensor
+    piLo1: torch.Tensor
+    piLo2: torch.Tensor
+    piLo3: torch.Tensor
+    piLo4: torch.Tensor
+    Femleaves_: torch.Tensor
+    EoutFrc_: torch.Tensor
+    EoutF_: torch.Tensor
+    LoF_: torch.Tensor
+
+
 class CanopyFluorescenceModel:
     """Canopy fluorescence transport with both simple and layered modes."""
 
@@ -249,9 +271,104 @@ class CanopyFluorescenceModel:
         wlF = fluspect.spectral.wlF
         if wlE is None or wlF is None:
             raise ValueError("Spectral grids must define excitation and fluorescence wavelengths")
-
-        hotspot_value = hotspot if hotspot is not None else torch.full_like(torch.as_tensor(lai), self.reflectance_model.default_hotspot)
         nl = self._resolve_nlayers(nlayers, etau=etau, etah=etah)
+
+        diagnostics = self._layered_diagnostics(
+            leafopt=leafopt,
+            leafbio=leafbio,
+            soil_refl=soil_refl,
+            lai=lai,
+            tts=tts,
+            tto=tto,
+            psi=psi,
+            Esun_=Esun_,
+            Esky_=Esky_,
+            hotspot=hotspot,
+            lidf=lidf,
+            nlayers=nl,
+            wlP=wlP,
+            wlE=wlE,
+            wlF=wlF,
+            etau=etau,
+            etah=etah,
+        )
+
+        reflectance = self.reflectance_model(
+            leafbio,
+            soil_refl,
+            lai,
+            tts,
+            tto,
+            psi,
+            hotspot=hotspot,
+            lidf=lidf,
+        )
+        gammasdf = self._interp1d(wlP, reflectance.gammasdf, wlF)
+        gammasdb = self._interp1d(wlP, reflectance.gammasdb, wlF)
+        gammaso = self._interp1d(wlP, reflectance.gammaso, wlF)
+
+        sigmaF = (diagnostics.LoF_ * torch.pi) / diagnostics.EoutFrc_.clamp(min=1e-12)
+
+        F685, wl685 = self._peak_in_window(diagnostics.LoF_, wlF, max_wavelength=700.0)
+        F740, wl740 = self._peak_in_window(diagnostics.LoF_, wlF, min_wavelength=700.0)
+        F684 = self._sample_nearest(diagnostics.LoF_, wlF, 684.0)
+        F761 = self._sample_nearest(diagnostics.LoF_, wlF, 761.0)
+        LoutF = 0.001 * torch.trapz(diagnostics.LoF_, wlF, dim=-1)
+        EoutF = 0.001 * torch.trapz(diagnostics.EoutF_, wlF, dim=-1)
+
+        return CanopyFluorescenceResult(
+            leaf_fluor_back=diagnostics.leaf_fluor_back,
+            leaf_fluor_forw=diagnostics.leaf_fluor_forw,
+            LoF_sunlit=diagnostics.piLo1 / torch.pi,
+            LoF_shaded=diagnostics.piLo2 / torch.pi,
+            LoF_scattered=diagnostics.piLo3 / torch.pi,
+            LoF_soil=diagnostics.piLo4 / torch.pi,
+            Femleaves_=diagnostics.Femleaves_,
+            EoutFrc_=diagnostics.EoutFrc_,
+            EoutF_=diagnostics.EoutF_,
+            LoF_=diagnostics.LoF_,
+            sigmaF=sigmaF,
+            gammasdf=gammasdf,
+            gammasdb=gammasdb,
+            gammaso=gammaso,
+            F685=F685,
+            wl685=wl685,
+            F740=F740,
+            wl740=wl740,
+            F684=F684,
+            F761=F761,
+            LoutF=LoutF,
+            EoutF=EoutF,
+            Fmin_=diagnostics.Fmin_,
+            Fplu_=diagnostics.Fplu_,
+        )
+
+    def _layered_diagnostics(
+        self,
+        *,
+        leafopt,
+        leafbio: LeafBioBatch,
+        soil_refl: torch.Tensor,
+        lai: torch.Tensor,
+        tts: torch.Tensor,
+        tto: torch.Tensor,
+        psi: torch.Tensor,
+        Esun_: torch.Tensor,
+        Esky_: torch.Tensor,
+        hotspot: Optional[torch.Tensor],
+        lidf: Optional[torch.Tensor],
+        nlayers: int,
+        wlP: torch.Tensor,
+        wlE: torch.Tensor,
+        wlF: torch.Tensor,
+        etau: Optional[torch.Tensor],
+        etah: Optional[torch.Tensor],
+    ) -> _LayeredFluorescenceDiagnostics:
+        nl = nlayers
+        hotspot_value = hotspot if hotspot is not None else torch.full_like(
+            torch.as_tensor(lai),
+            self.reflectance_model.default_hotspot,
+        )
 
         rho_e = self._sample_spectrum(leafopt.refl, wlP, wlE)
         tau_e = self._sample_spectrum(leafopt.tran, wlP, wlE)
@@ -291,6 +408,9 @@ class CanopyFluorescenceModel:
         diffuse = self.layered_transport.flux_profiles(transport_e, torch.zeros_like(Esun), Esky)
         total_Emin = direct.Emin_ + diffuse.Emin_
         total_Eplu = direct.Eplu_ + diffuse.Eplu_
+
+        leaf_fluor_back = torch.einsum("bfe,be->bf", leafopt.Mb, Esun)
+        leaf_fluor_forw = torch.einsum("bfe,be->bf", leafopt.Mf, Esun)
 
         Mplu = 0.5 * (leafopt.Mb + leafopt.Mf)
         Mmin = 0.5 * (leafopt.Mb - leafopt.Mf)
@@ -388,54 +508,25 @@ class CanopyFluorescenceModel:
             wlE=wlE,
             wlF=wlF,
         )
-        sigmaF = (LoF_ * torch.pi) / EoutFrc_.clamp(min=1e-12)
-
-        reflectance = self.reflectance_model(
-            leafbio,
-            soil_refl,
-            lai,
-            tts,
-            tto,
-            psi,
-            hotspot=hotspot_value,
-            lidf=lidf,
-        )
-        gammasdf = self._interp1d(wlP, reflectance.gammasdf, wlF)
-        gammasdb = self._interp1d(wlP, reflectance.gammasdb, wlF)
-        gammaso = self._interp1d(wlP, reflectance.gammaso, wlF)
-
-        F685, wl685 = self._peak_in_window(LoF_, wlF, max_wavelength=700.0)
-        F740, wl740 = self._peak_in_window(LoF_, wlF, min_wavelength=700.0)
-        F684 = self._sample_nearest(LoF_, wlF, 684.0)
-        F761 = self._sample_nearest(LoF_, wlF, 761.0)
-        LoutF = 0.001 * torch.trapz(LoF_, wlF, dim=-1)
-        EoutF = 0.001 * torch.trapz(EoutF_, wlF, dim=-1)
-
-        return CanopyFluorescenceResult(
-            leaf_fluor_back=torch.einsum("bfe,be->bf", leafopt.Mb, Esun),
-            leaf_fluor_forw=torch.einsum("bfe,be->bf", leafopt.Mf, Esun),
-            LoF_sunlit=piLo1 / torch.pi,
-            LoF_shaded=piLo2 / torch.pi,
-            LoF_scattered=piLo3 / torch.pi,
-            LoF_soil=piLo4 / torch.pi,
+        return _LayeredFluorescenceDiagnostics(
+            leaf_fluor_back=leaf_fluor_back,
+            leaf_fluor_forw=leaf_fluor_forw,
+            MpluEsun=MpluEsun,
+            MminEsun=MminEsun,
+            piLs=piLs,
+            piLd=piLd,
+            Femmin=Femmin,
+            Femplu=Femplu,
+            Fmin_=Fmin,
+            Fplu_=Fplu,
+            piLo1=piLo1,
+            piLo2=piLo2,
+            piLo3=piLo3,
+            piLo4=piLo4,
             Femleaves_=Femleaves_,
             EoutFrc_=EoutFrc_,
             EoutF_=EoutF_,
             LoF_=LoF_,
-            sigmaF=sigmaF,
-            gammasdf=gammasdf,
-            gammasdb=gammasdb,
-            gammaso=gammaso,
-            F685=F685,
-            wl685=wl685,
-            F740=F740,
-            wl740=wl740,
-            F684=F684,
-            F761=F761,
-            LoutF=LoutF,
-            EoutF=EoutF,
-            Fmin_=Fmin,
-            Fplu_=Fplu,
         )
 
     def layered_biochemical(
