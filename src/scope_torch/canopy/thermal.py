@@ -176,7 +176,7 @@ class CanopyThermalRadianceModel:
         Eoutte = Eplu[:, 0, :]
         Loutt = 0.001 * torch.trapz(Lot, wlT, dim=-1)
         Eoutt = 0.001 * torch.trapz(Eoutte, wlT, dim=-1)
-        sigma_sb = torch.as_tensor(5.670374419e-8, device=device, dtype=dtype)
+        sigma_sb = torch.as_tensor(5.67e-8, device=device, dtype=dtype)
         Tbr = torch.clamp(torch.pi * Loutt / sigma_sb, min=0.0) ** 0.25
         LotBB = self._planck(wlT, Tbr.unsqueeze(-1), torch.ones((batch, wlT.numel()), device=device, dtype=dtype))
 
@@ -285,7 +285,7 @@ class CanopyThermalRadianceModel:
         return emissivity * c1 * wavelength_term / torch.expm1(exponent)
 
     def _stefan_boltzmann(self, temperature_c: torch.Tensor) -> torch.Tensor:
-        sigma_sb = torch.as_tensor(5.670374419e-8, device=temperature_c.device, dtype=temperature_c.dtype)
+        sigma_sb = torch.as_tensor(5.67e-8, device=temperature_c.device, dtype=temperature_c.dtype)
         kelvin = torch.clamp(temperature_c + 273.15, min=0.0)
         return sigma_sb * kelvin**4
 

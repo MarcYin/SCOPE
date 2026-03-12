@@ -129,7 +129,11 @@ soil.refl(spectral.IwlT) = soil.rs_thermal;
 
 [rad, gap] = RTMo(spectral, atmo, soil, leafopt, canopy, angles, constants, meteo, options); %#ok<ASGLU>
 optical_diag = rtmo_observation_diagnostics(spectral, rad, soil, canopy, gap);
+global SCOPE_BENCHMARK_TRACE
+SCOPE_BENCHMARK_TRACE = struct();
 [iter, rad, thermal, soil, bcu, bch, fluxes, resistance, meteo] = ebal(constants, options, rad, gap, meteo, soil, canopy, leafbio, case_index, xyt, integr);
+trace = SCOPE_BENCHMARK_TRACE;
+clear global SCOPE_BENCHMARK_TRACE
 
 if options.calc_fluor
     fluor_diag = rtmf_source_diagnostics(constants, spectral, rad, soil, leafopt, canopy, gap, angles, bcu.eta, bch.eta);
@@ -311,6 +315,14 @@ benchmark.energy_Csu = reconstruct_boundary_co2(meteo.Ca, bcu.Ci(:), resistance,
 benchmark.energy_Csh = reconstruct_boundary_co2(meteo.Ca, bch.Ci(:), resistance, canopy.LAI, bch.rcw(:));
 benchmark.energy_ebu = reconstruct_boundary_vapor(meteo.ea, thermal.Tcu(:), resistance, canopy.LAI, bcu.rcw(:));
 benchmark.energy_ebh = reconstruct_boundary_vapor(meteo.ea, thermal.Tch(:), resistance, canopy.LAI, bch.rcw(:));
+benchmark.energy_iter_Csu = trace.biochem_input_Csu(:);
+benchmark.energy_iter_Csh = trace.biochem_input_Csh(:);
+benchmark.energy_iter_ebu = trace.biochem_input_ebu(:);
+benchmark.energy_iter_ebh = trace.biochem_input_ebh(:);
+benchmark.energy_iter_Tcu = trace.biochem_input_Tcu(:);
+benchmark.energy_iter_Tch = trace.biochem_input_Tch(:);
+benchmark.energy_iter_Pnu_Cab = trace.biochem_input_Pnu_Cab(:);
+benchmark.energy_iter_Pnh_Cab = trace.biochem_input_Pnh_Cab(:);
 benchmark.energy_Pnu_Cab = rad.Pnu_Cab(:);
 benchmark.energy_Pnh_Cab = rad.Pnh_Cab(:);
 
@@ -358,6 +370,7 @@ benchmark.resistance_rai = resistance.rai;
 benchmark.resistance_rar = resistance.rar;
 benchmark.resistance_rac = resistance.rac;
 benchmark.resistance_rws = resistance.rws;
+benchmark.resistance_L = trace.resistance_L;
 
 out_dir = fileparts(output_path);
 if ~isempty(out_dir) && ~isfolder(out_dir)

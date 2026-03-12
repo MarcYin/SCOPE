@@ -9,7 +9,7 @@ import numpy as np
 import torch
 from scipy.io import loadmat
 
-from scope_torch.biochem import LeafBiochemistryInputs
+from scope_torch.biochem import LeafBiochemistryInputs, LeafMeteo
 from scope_torch.canopy.fluorescence import CanopyFluorescenceModel
 from scope_torch.canopy.foursail import FourSAILModel
 from scope_torch.canopy.reflectance import CanopyReflectanceModel
@@ -205,7 +205,7 @@ def main() -> int:
     _record(report, "leaf", "Mb", leafopt_rtmf.Mb[0], _tensor(benchmark["leaf_Mb"], device=device, dtype=dtype))
     _record(report, "leaf", "Mf", leafopt_rtmf.Mf[0], _tensor(benchmark["leaf_Mf"], device=device, dtype=dtype))
 
-    canopy = reflectance_model(leafbio, soil_refl, lai, tts, tto, psi, hotspot=hotspot)
+    canopy = reflectance_model(leafbio, soil_refl, lai, tts, tto, psi, hotspot=hotspot, nlayers=nlayers)
     _record(report, "reflectance", "rsd", canopy.rsd[0], _vector(benchmark["canopy_rsd"], device=device, dtype=dtype))
     _record(report, "reflectance", "rdd", canopy.rdd[0], _vector(benchmark["canopy_rdd"], device=device, dtype=dtype))
     _record(report, "reflectance", "rdo", canopy.rdo[0], _vector(benchmark["canopy_rdo"], device=device, dtype=dtype))
@@ -322,7 +322,7 @@ def main() -> int:
             h=torch.tensor([_scalar(benchmark["canopy_hc"])], device=device, dtype=dtype),
             z=torch.tensor([_scalar(benchmark["meteo_z"])], device=device, dtype=dtype),
             u=torch.tensor([_scalar(benchmark["meteo_u"])], device=device, dtype=dtype),
-            L=torch.tensor([_scalar(benchmark["meteo_L"])], device=device, dtype=dtype),
+            L=torch.tensor([_scalar(benchmark.get("resistance_L", benchmark["meteo_L"]))], device=device, dtype=dtype),
             rbs=torch.tensor([_scalar(benchmark["soil_rbs"])], device=device, dtype=dtype),
         )
     )
@@ -393,6 +393,54 @@ def main() -> int:
         hotspot=hotspot,
         nlayers=nlayers,
     )
+    if "energy_iter_Csu" in benchmark:
+        _record(report, "energy_iteration_input", "sunlit_Cs", energy.sunlit_Cs_input, _batch_profile(benchmark["energy_iter_Csu"], device=device, dtype=dtype))
+        _record(report, "energy_iteration_input", "shaded_Cs", energy.shaded_Cs_input, _batch_profile(benchmark["energy_iter_Csh"], device=device, dtype=dtype))
+        _record(report, "energy_iteration_input", "sunlit_eb", energy.sunlit_eb_input, _batch_profile(benchmark["energy_iter_ebu"], device=device, dtype=dtype))
+        _record(report, "energy_iteration_input", "shaded_eb", energy.shaded_eb_input, _batch_profile(benchmark["energy_iter_ebh"], device=device, dtype=dtype))
+        _record(report, "energy_iteration_input", "sunlit_T", energy.sunlit_T_input, _batch_profile(benchmark["energy_iter_Tcu"], device=device, dtype=dtype))
+        _record(report, "energy_iteration_input", "shaded_T", energy.shaded_T_input, _batch_profile(benchmark["energy_iter_Tch"], device=device, dtype=dtype))
+
+        xl = torch.cat(
+            [
+                torch.zeros(1, device=device, dtype=dtype),
+                -torch.arange(1, nlayers + 1, device=device, dtype=dtype) / float(nlayers),
+            ]
+        )
+        fV = torch.exp(torch.tensor([_scalar(benchmark["canopy_kV"])], device=device, dtype=dtype).unsqueeze(-1) * xl[:-1].unsqueeze(0)).reshape(-1)
+        leaf_kernel = energy_model.fluorescence_model.leaf_biochemistry
+        sunlit_iter = leaf_kernel(
+            biochemistry,
+            LeafMeteo(
+                Q=_vector(benchmark["energy_iter_Pnu_Cab"], device=device, dtype=dtype),
+                Cs=_vector(benchmark["energy_iter_Csu"], device=device, dtype=dtype),
+                T=_vector(benchmark["energy_iter_Tcu"], device=device, dtype=dtype),
+                eb=_vector(benchmark["energy_iter_ebu"], device=device, dtype=dtype),
+                Oa=torch.full((nlayers,), _scalar(benchmark["meteo_Oa"]), device=device, dtype=dtype),
+                p=torch.full((nlayers,), _scalar(benchmark["meteo_p"]), device=device, dtype=dtype),
+            ),
+            fV=fV,
+        )
+        shaded_iter = leaf_kernel(
+            biochemistry,
+            LeafMeteo(
+                Q=_vector(benchmark["energy_iter_Pnh_Cab"], device=device, dtype=dtype),
+                Cs=_vector(benchmark["energy_iter_Csh"], device=device, dtype=dtype),
+                T=_vector(benchmark["energy_iter_Tch"], device=device, dtype=dtype),
+                eb=_vector(benchmark["energy_iter_ebh"], device=device, dtype=dtype),
+                Oa=torch.full((nlayers,), _scalar(benchmark["meteo_Oa"]), device=device, dtype=dtype),
+                p=torch.full((nlayers,), _scalar(benchmark["meteo_p"]), device=device, dtype=dtype),
+            ),
+            fV=fV,
+        )
+        _record(report, "leaf_iteration", "sunlit_A", sunlit_iter.A, _vector(benchmark["energy_sunlit_A"], device=device, dtype=dtype))
+        _record(report, "leaf_iteration", "shaded_A", shaded_iter.A, _vector(benchmark["energy_shaded_A"], device=device, dtype=dtype))
+        _record(report, "leaf_iteration", "sunlit_Ci", sunlit_iter.Ci, _vector(benchmark["energy_sunlit_Ci"], device=device, dtype=dtype))
+        _record(report, "leaf_iteration", "shaded_Ci", shaded_iter.Ci, _vector(benchmark["energy_shaded_Ci"], device=device, dtype=dtype))
+        _record(report, "leaf_iteration", "sunlit_rcw", sunlit_iter.rcw, _vector(benchmark["energy_sunlit_rcw"], device=device, dtype=dtype))
+        _record(report, "leaf_iteration", "shaded_rcw", shaded_iter.rcw, _vector(benchmark["energy_shaded_rcw"], device=device, dtype=dtype))
+        _record(report, "leaf_iteration", "sunlit_eta", sunlit_iter.eta, _vector(benchmark["energy_sunlit_eta"], device=device, dtype=dtype))
+        _record(report, "leaf_iteration", "shaded_eta", shaded_iter.eta, _vector(benchmark["energy_shaded_eta"], device=device, dtype=dtype))
     _record(report, "energy_balance", "sunlit_eta", energy.sunlit.eta, _batch_profile(benchmark["energy_sunlit_eta"], device=device, dtype=dtype))
     _record(report, "energy_balance", "shaded_eta", energy.shaded.eta, _batch_profile(benchmark["energy_shaded_eta"], device=device, dtype=dtype))
     _record(report, "energy_balance", "sunlit_A", energy.sunlit.A, _batch_profile(benchmark["energy_sunlit_A"], device=device, dtype=dtype))

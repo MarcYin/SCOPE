@@ -60,9 +60,17 @@ def test_scope_benchmark_locked_subsystems(tmp_path):
 
     resistances = report["resistances_direct"]
     for name in ("ustar", "Kh", "rai", "rar", "rac", "rws", "raa", "raws"):
-        assert resistances[name]["max_rel"] < 5e-3
-    assert resistances["uz0"]["max_rel"] < 1e-2
+        assert resistances[name]["max_rel"] < 1e-9
+    assert resistances["uz0"]["max_rel"] < 1e-9
     assert resistances["rawc"]["max_abs"] == 0.0
+
+    iteration_inputs = report["energy_iteration_input"]
+    for name in ("sunlit_Cs", "shaded_Cs", "sunlit_eb", "shaded_eb", "sunlit_T", "shaded_T"):
+        assert iteration_inputs[name]["max_rel"] < 1e-3
+
+    leaf_iteration = report["leaf_iteration"]
+    for name in ("sunlit_A", "shaded_A", "sunlit_Ci", "shaded_Ci", "sunlit_rcw", "shaded_rcw", "sunlit_eta", "shaded_eta"):
+        assert leaf_iteration[name]["max_rel"] < 1e-9
 
     thermal_transport = report["thermal_transport"]
     for name in ("Lot_", "Eoutte_", "Loutt", "Eoutt"):

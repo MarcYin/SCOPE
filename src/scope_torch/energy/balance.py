@@ -83,6 +83,12 @@ class IncidentThermalRadiationResult:
 class CanopyEnergyBalanceResult:
     sunlit: LeafBiochemistryResult
     shaded: LeafBiochemistryResult
+    sunlit_Cs_input: torch.Tensor
+    shaded_Cs_input: torch.Tensor
+    sunlit_eb_input: torch.Tensor
+    shaded_eb_input: torch.Tensor
+    sunlit_T_input: torch.Tensor
+    shaded_T_input: torch.Tensor
     Pnu_Cab: torch.Tensor
     Pnh_Cab: torch.Tensor
     Rnuc_sw: torch.Tensor
@@ -165,7 +171,7 @@ class CanopyEnergyBalanceModel:
         self.cp = 1004.0
         self.kappa = 0.4
         self.g = 9.81
-        self.sigma_sb = 5.670374419e-8
+        self.sigma_sb = 5.67e-8
         self.MH2O = 18.0
         self.Mair = 28.96
 
@@ -285,9 +291,18 @@ class CanopyEnergyBalanceModel:
         lEch = Hch = lEcu = Hcu = None
         lEs = Hs = G = None
         max_error = torch.full((batch,), torch.inf, device=device, dtype=dtype)
+        sunlit_Cs_input = shaded_Cs_input = None
+        sunlit_eb_input = shaded_eb_input = None
+        sunlit_T_input = shaded_T_input = None
 
         for iteration in range(1, opts.max_iter + 1):
             iterating = active.clone()
+            sunlit_Cs_input = Ccu.clone()
+            shaded_Cs_input = Cch.clone()
+            sunlit_eb_input = ecu.clone()
+            shaded_eb_input = ech.clone()
+            sunlit_T_input = Tcu.clone()
+            shaded_T_input = Tch.clone()
             sunlit = self.fluorescence_model._run_leaf_biochemistry(
                 biochemistry=biochemistry,
                 Q=shortwave.Pnu_Cab,
@@ -493,6 +508,12 @@ class CanopyEnergyBalanceModel:
             or lEs is None
             or Hs is None
             or G is None
+            or sunlit_Cs_input is None
+            or shaded_Cs_input is None
+            or sunlit_eb_input is None
+            or shaded_eb_input is None
+            or sunlit_T_input is None
+            or shaded_T_input is None
         ):
             raise RuntimeError("Energy balance did not execute")
 
@@ -517,6 +538,12 @@ class CanopyEnergyBalanceModel:
         return CanopyEnergyBalanceResult(
             sunlit=sunlit,
             shaded=shaded,
+            sunlit_Cs_input=sunlit_Cs_input,
+            shaded_Cs_input=shaded_Cs_input,
+            sunlit_eb_input=sunlit_eb_input,
+            shaded_eb_input=shaded_eb_input,
+            sunlit_T_input=sunlit_T_input,
+            shaded_T_input=shaded_T_input,
             Pnu_Cab=shortwave.Pnu_Cab,
             Pnh_Cab=shortwave.Pnh_Cab,
             Rnuc_sw=shortwave.Rnuc,
@@ -857,19 +884,23 @@ class CanopyEnergyBalanceModel:
 
         n_optical = wlP.numel()
         E_layer_optical = E_layer[:, :, :n_optical]
-        E_layer_thermal = E_layer[:, :, n_optical:]
         epsc_optical = epsc[:, :n_optical]
-        epsc_thermal = epsc[:, n_optical:]
         epss_optical = epss[:, :n_optical]
+        E_layer_thermal = E_layer[:, :, n_optical:]
+        epsc_thermal = epsc[:, n_optical:]
         epss_thermal = epss[:, n_optical:]
 
-        asun = 0.001 * (
-            torch.trapz(Esun_optical * epsc_optical, wlP, dim=-1)
-            + torch.trapz(Esun_thermal * epsc_thermal, wlT_tensor, dim=-1)
+        asun = 0.001 * self._integrate_spectral_blocks(
+            optical=Esun_optical * epsc_optical,
+            thermal=Esun_thermal * epsc_thermal,
+            wl_optical=wlP,
+            wl_thermal=wlT_tensor,
         )
-        rndif = 0.001 * (
-            torch.trapz(E_layer_optical * epsc_optical.unsqueeze(1), wlP, dim=-1)
-            + torch.trapz(E_layer_thermal * epsc_thermal.unsqueeze(1), wlT_tensor, dim=-1)
+        rndif = 0.001 * self._integrate_spectral_blocks(
+            optical=E_layer_optical * epsc_optical.unsqueeze(1),
+            thermal=E_layer_thermal * epsc_thermal.unsqueeze(1),
+            wl_optical=wlP,
+            wl_thermal=wlT_tensor,
         )
         sunlit_factor = (transfer.absfs * transfer.lidf_azimuth).sum(dim=-1)
         rndir = sunlit_factor.view(batch, 1) * asun.view(batch, 1)
@@ -885,13 +916,17 @@ class CanopyEnergyBalanceModel:
         )
         pnudir_cab = sunlit_factor.view(batch, 1) * pnsun_cab.view(batch, 1)
 
-        rndir_soil = 0.001 * (
-            torch.trapz(Esun_optical * epss_optical, wlP, dim=-1)
-            + torch.trapz(Esun_thermal * epss_thermal, wlT_tensor, dim=-1)
+        rndir_soil = 0.001 * self._integrate_spectral_blocks(
+            optical=Esun_optical * epss_optical,
+            thermal=Esun_thermal * epss_thermal,
+            wl_optical=wlP,
+            wl_thermal=wlT_tensor,
         )
-        rndif_soil = 0.001 * (
-            torch.trapz(total_Emin[:, -1, :n_optical] * epss_optical, wlP, dim=-1)
-            + torch.trapz(total_Emin[:, -1, n_optical:] * epss_thermal, wlT_tensor, dim=-1)
+        rndif_soil = 0.001 * self._integrate_spectral_blocks(
+            optical=total_Emin[:, -1, :n_optical] * epss_optical,
+            thermal=total_Emin[:, -1, n_optical:] * epss_thermal,
+            wl_optical=wlP,
+            wl_thermal=wlT_tensor,
         )
         return ShortwaveRadiationResult(
             transfer=transfer,
@@ -976,6 +1011,36 @@ class CanopyEnergyBalanceModel:
         denom = self.kappa * self.g * H
         L = torch.where(torch.abs(denom) <= 1e-12, torch.full_like(denom, -1e6), numerator / denom)
         return torch.where(torch.isfinite(L), L, torch.full_like(L, -1e6))
+
+    def _integrate_spectral_blocks(
+        self,
+        *,
+        optical: torch.Tensor,
+        thermal: torch.Tensor,
+        wl_optical: torch.Tensor,
+        wl_thermal: torch.Tensor,
+    ) -> torch.Tensor:
+        total = torch.trapz(optical, wl_optical, dim=-1)
+        if thermal.shape[-1] == 0 or wl_thermal.numel() == 0:
+            return total
+
+        total = total + torch.trapz(thermal, wl_thermal, dim=-1)
+        if wl_optical.numel() == 0:
+            return total
+
+        if wl_optical.numel() >= 2:
+            optical_step = torch.abs(wl_optical[-1] - wl_optical[-2])
+        else:
+            optical_step = torch.tensor(0.0, device=wl_optical.device, dtype=wl_optical.dtype)
+        if wl_thermal.numel() >= 2:
+            thermal_step = torch.abs(wl_thermal[1] - wl_thermal[0])
+        else:
+            thermal_step = torch.tensor(0.0, device=wl_thermal.device, dtype=wl_thermal.dtype)
+        seam_gap = torch.abs(wl_thermal[0] - wl_optical[-1])
+        seam_limit = 5.0 * torch.maximum(optical_step, thermal_step).clamp(min=1.0)
+        if bool((seam_gap <= seam_limit).item()):
+            total = total + 0.5 * seam_gap * (optical[..., -1] + thermal[..., 0])
+        return total
 
     def _soil_heat_flux(
         self,

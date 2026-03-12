@@ -134,8 +134,6 @@ def aerodynamic_resistances(
     uz0 = uh * torch.exp(n * (((z0m + d) / h) - 1.0))
 
     sinh_n = torch.sinh(n)
-    # Match upstream SCOPE `resistances.m`: canopy resistances use the base
-    # Kh prior to the exported stability correction.
     denom = (n * Kh_base).clamp(min=1e-12)
     exp_top = torch.exp(n)
     exp_z0 = torch.exp(n * (z0m + d) / h)
