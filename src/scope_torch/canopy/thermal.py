@@ -250,22 +250,14 @@ class CanopyThermalRadianceModel:
             Tsh=Tsh_tensor,
         )
 
-        black_transfer = self.layered_transport.build(
-            torch.zeros((batch, 1), device=device, dtype=dtype),
-            torch.zeros((batch, 1), device=device, dtype=dtype),
-            torch.zeros((batch, 1), device=device, dtype=dtype),
-            lai_tensor,
-            tts,
-            tto,
-            psi,
-            hotspot=hotspot_value,
-            lidf=self.reflectance_model.lidf if lidf is None else lidf,
-            nlayers=nl,
-        )
+        # MATLAB ebal.m reuses the same RTMo thermal transport coefficients for
+        # the blackbody normalization and only swaps the leaf/soil emissivities
+        # to one. Rebuilding a separate zero-reflectance transfer changes the
+        # scattering path and biases canopy emissivity.
         black = self._integrated_balance_core(
-            transfer=black_transfer,
-            epsc=torch.ones((batch,), device=device, dtype=dtype),
-            epss=torch.ones((batch,), device=device, dtype=dtype),
+            transfer=transfer,
+            epsc=torch.ones_like(epsc),
+            epss=torch.ones_like(epss),
             Tcu=Tcu_tensor,
             Tch=Tch_tensor,
             Tsu=Tsu_tensor,
@@ -447,7 +439,10 @@ class CanopyThermalRadianceModel:
         for layer in range(nl):
             Emin[:, layer + 1] = transfer.Xdd[:, layer, 0] * Emin[:, layer] + Y[:, layer]
             Eplu[:, layer] = transfer.R_dd[:, layer, 0] * Emin[:, layer] + U[:, layer]
-        Eplu[:, -1] = transfer.R_dd[:, -1, 0] * Emin[:, -1] + Hs
+        # Match RTMt_sb.m: the soil-surface upward flux uses the canopy-bottom
+        # coefficients (index nl in MATLAB, nl-1 in 0-based indexing), not
+        # the background slot stored at the last R_dd entry.
+        Eplu[:, -1] = transfer.R_dd[:, -2, 0] * Emin[:, -2] + Hs
 
         Po = transfer.Po[:, :nl]
         Pso = transfer.Pso[:, :nl]

@@ -255,28 +255,14 @@ class CanopyEnergyBalanceModel:
             psi=psi,
             Esun_sw=Esun_sw,
             Esky_sw=Esky_sw,
+            Esun_lw=Esun_lw,
+            Esky_lw=Esky_lw,
+            thermal_optics=soil.thermal_optics,
             hotspot=hotspot_value,
             lidf=lidf,
             nlayers=nl,
+            wlT=wlT,
         )
-        if Esun_lw is not None and Esky_lw is not None:
-            incident_thermal = self._incoming_thermal_radiation(
-                lai=lai_tensor,
-                tts=tts,
-                tto=tto,
-                psi=psi,
-                Esun_lw=Esun_lw,
-                Esky_lw=Esky_lw,
-                thermal_optics=soil.thermal_optics,
-                hotspot=hotspot_value,
-                lidf=lidf,
-                nlayers=nl,
-                wlT=wlT,
-            )
-            shortwave.Rnuc = shortwave.Rnuc + incident_thermal.Rnuc
-            shortwave.Rnhc = shortwave.Rnhc + incident_thermal.Rnhc
-            shortwave.Rnus = shortwave.Rnus + incident_thermal.Rnus
-            shortwave.Rnhs = shortwave.Rnhs + incident_thermal.Rnhs
 
         fV = self._fV_profile(canopy, shortwave.transfer, batch)
         e_to_q = (self.MH2O / self.Mair) / pressure
@@ -810,18 +796,47 @@ class CanopyEnergyBalanceModel:
         psi: torch.Tensor,
         Esun_sw: torch.Tensor,
         Esky_sw: torch.Tensor,
+        Esun_lw: Optional[torch.Tensor] = None,
+        Esky_lw: Optional[torch.Tensor] = None,
+        thermal_optics: Optional[ThermalOptics] = None,
         hotspot: torch.Tensor,
         lidf: Optional[torch.Tensor],
         nlayers: int,
+        wlT: Optional[torch.Tensor] = None,
     ) -> ShortwaveRadiationResult:
         wlP = self.reflectance_model.fluspect.spectral.wlP
+        device = leafopt.refl.device
+        dtype = leafopt.refl.dtype
         batch = leafopt.refl.shape[0]
-        Esun = self.fluorescence_model._prepare_spectrum(Esun_sw, batch, wlP.numel())
-        Esky = self.fluorescence_model._prepare_spectrum(Esky_sw, batch, wlP.numel())
-        soil = self.reflectance_model.sail._ensure_2d(soil_refl, target_shape=leafopt.refl.shape)
+        Esun_optical = self.fluorescence_model._prepare_spectrum(Esun_sw, batch, wlP.numel())
+        Esky_optical = self.fluorescence_model._prepare_spectrum(Esky_sw, batch, wlP.numel())
+        soil_optical = self.reflectance_model.sail._ensure_2d(soil_refl, target_shape=leafopt.refl.shape)
+
+        if thermal_optics is None:
+            thermal_optics = ThermalOptics()
+        wlT_tensor = default_thermal_wavelengths(device=device, dtype=dtype) if wlT is None else torch.as_tensor(wlT, device=device, dtype=dtype)
+        rho_thermal = self.thermal_model._broadcast_scalar_spectrum(thermal_optics.rho_thermal, batch, wlT_tensor)
+        tau_thermal = self.thermal_model._broadcast_scalar_spectrum(thermal_optics.tau_thermal, batch, wlT_tensor)
+        soil_thermal = self.thermal_model._broadcast_scalar_spectrum(thermal_optics.rs_thermal, batch, wlT_tensor)
+        Esun_thermal = (
+            torch.zeros((batch, wlT_tensor.numel()), device=device, dtype=dtype)
+            if Esun_lw is None
+            else self.fluorescence_model._prepare_spectrum(Esun_lw, batch, wlT_tensor.numel())
+        )
+        Esky_thermal = (
+            torch.zeros((batch, wlT_tensor.numel()), device=device, dtype=dtype)
+            if Esky_lw is None
+            else self.fluorescence_model._prepare_spectrum(Esky_lw, batch, wlT_tensor.numel())
+        )
+
+        Esun = torch.cat([Esun_optical, Esun_thermal], dim=-1)
+        Esky = torch.cat([Esky_optical, Esky_thermal], dim=-1)
+        rho = torch.cat([leafopt.refl, rho_thermal], dim=-1)
+        tau = torch.cat([leafopt.tran, tau_thermal], dim=-1)
+        soil = torch.cat([soil_optical, soil_thermal], dim=-1)
         transfer = self.fluorescence_model.layered_transport.build(
-            leafopt.refl,
-            leafopt.tran,
+            rho,
+            tau,
             soil,
             lai,
             tts,
@@ -836,28 +851,48 @@ class CanopyEnergyBalanceModel:
         total_Emin = direct.Emin_ + diffuse.Emin_
         total_Eplu = direct.Eplu_ + diffuse.Eplu_
 
-        epsc = (1.0 - leafopt.refl - leafopt.tran).clamp(min=0.0)
+        epsc = (1.0 - rho - tau).clamp(min=0.0)
         epss = (1.0 - soil).clamp(min=0.0)
         E_layer = 0.5 * (total_Emin[:, :-1, :] + total_Emin[:, 1:, :] + total_Eplu[:, :-1, :] + total_Eplu[:, 1:, :])
 
-        asun = 0.001 * torch.trapz(Esun * epsc, wlP, dim=-1)
-        rndif = 0.001 * torch.trapz(E_layer * epsc.unsqueeze(1), wlP, dim=-1)
+        n_optical = wlP.numel()
+        E_layer_optical = E_layer[:, :, :n_optical]
+        E_layer_thermal = E_layer[:, :, n_optical:]
+        epsc_optical = epsc[:, :n_optical]
+        epsc_thermal = epsc[:, n_optical:]
+        epss_optical = epss[:, :n_optical]
+        epss_thermal = epss[:, n_optical:]
+
+        asun = 0.001 * (
+            torch.trapz(Esun_optical * epsc_optical, wlP, dim=-1)
+            + torch.trapz(Esun_thermal * epsc_thermal, wlT_tensor, dim=-1)
+        )
+        rndif = 0.001 * (
+            torch.trapz(E_layer_optical * epsc_optical.unsqueeze(1), wlP, dim=-1)
+            + torch.trapz(E_layer_thermal * epsc_thermal.unsqueeze(1), wlT_tensor, dim=-1)
+        )
         sunlit_factor = (transfer.absfs * transfer.lidf_azimuth).sum(dim=-1)
         rndir = sunlit_factor.view(batch, 1) * asun.view(batch, 1)
 
         # RTMo stores absorbed PAR for biochemistry in umol m-2 s-1 while the
         # spectral forcing is in mW m-2 nm-1. Multiplying by 1e3 applies the
         # mW->W and mol->umol conversions together.
-        pnsun_cab = 1e3 * torch.trapz(self._e2phot(wlP, Esun * epsc * leafopt.kChlrel), wlP, dim=-1)
+        pnsun_cab = 1e3 * torch.trapz(self._e2phot(wlP, Esun_optical * epsc_optical * leafopt.kChlrel), wlP, dim=-1)
         pndif_cab = 1e3 * torch.trapz(
-            self._e2phot(wlP, E_layer * epsc.unsqueeze(1) * leafopt.kChlrel.unsqueeze(1)),
+            self._e2phot(wlP, E_layer_optical * epsc_optical.unsqueeze(1) * leafopt.kChlrel.unsqueeze(1)),
             wlP,
             dim=-1,
         )
         pnudir_cab = sunlit_factor.view(batch, 1) * pnsun_cab.view(batch, 1)
 
-        rndir_soil = 0.001 * torch.trapz(Esun * epss, wlP, dim=-1)
-        rndif_soil = 0.001 * torch.trapz(total_Emin[:, -1, :] * epss, wlP, dim=-1)
+        rndir_soil = 0.001 * (
+            torch.trapz(Esun_optical * epss_optical, wlP, dim=-1)
+            + torch.trapz(Esun_thermal * epss_thermal, wlT_tensor, dim=-1)
+        )
+        rndif_soil = 0.001 * (
+            torch.trapz(total_Emin[:, -1, :n_optical] * epss_optical, wlP, dim=-1)
+            + torch.trapz(total_Emin[:, -1, n_optical:] * epss_thermal, wlT_tensor, dim=-1)
+        )
         return ShortwaveRadiationResult(
             transfer=transfer,
             Rnuc=rndir + rndif,

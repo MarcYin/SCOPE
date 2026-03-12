@@ -125,6 +125,46 @@ def test_energy_balance_fv_profile_uses_upper_layer_edges():
     assert torch.allclose(fV[:, 0], torch.ones_like(fV[:, 0]), atol=1e-12, rtol=1e-10)
 
 
+def test_energy_balance_zero_longwave_forcing_is_a_no_op():
+    model, leafbio, _, soil_refl, lai, tts, tto, psi, Esun_sw, Esky_sw, _, _, soil, _ = _setup_energy_case()
+
+    leafopt = model.reflectance_model.fluspect(leafbio)
+    hotspot = torch.full_like(lai, model.reflectance_model.default_hotspot)
+    baseline = model._shortwave_radiation(
+        leafopt=leafopt,
+        soil_refl=soil_refl,
+        lai=lai,
+        tts=tts,
+        tto=tto,
+        psi=psi,
+        Esun_sw=Esun_sw,
+        Esky_sw=Esky_sw,
+        hotspot=hotspot,
+        lidf=None,
+        nlayers=4,
+    )
+    zero_lw = model._shortwave_radiation(
+        leafopt=leafopt,
+        soil_refl=soil_refl,
+        lai=lai,
+        tts=tts,
+        tto=tto,
+        psi=psi,
+        Esun_sw=Esun_sw,
+        Esky_sw=Esky_sw,
+        Esun_lw=torch.zeros((1, 5), device=leafopt.refl.device, dtype=leafopt.refl.dtype),
+        Esky_lw=torch.zeros((1, 5), device=leafopt.refl.device, dtype=leafopt.refl.dtype),
+        thermal_optics=soil.thermal_optics,
+        hotspot=hotspot,
+        lidf=None,
+        nlayers=4,
+        wlT=torch.linspace(8000.0, 12000.0, 5, device=leafopt.refl.device, dtype=leafopt.refl.dtype),
+    )
+
+    for name in ("Rnuc", "Rnhc", "Rnus", "Rnhs", "Pnu_Cab", "Pnh_Cab"):
+        assert torch.allclose(getattr(baseline, name), getattr(zero_lw, name), atol=1e-12, rtol=1e-10)
+
+
 def test_energy_balance_fluorescence_matches_manual_eta_transport():
     model, leafbio, biochemistry, soil_refl, lai, tts, tto, psi, Esun_sw, Esky_sw, meteo, canopy, soil, options = _setup_energy_case()
 

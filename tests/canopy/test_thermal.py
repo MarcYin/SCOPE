@@ -185,7 +185,7 @@ def test_canopy_thermal_integrated_balance_terms_are_consistent():
     assert torch.all(result.canopyemis > 0)
     assert torch.allclose(
         result.Eplut[:, -1],
-        optics.rs_thermal * result.Emint[:, -1] + hs,
+        transfer.R_dd[:, -2, 0] * result.Emint[:, -2] + hs,
         atol=1e-12,
         rtol=1e-10,
     )
