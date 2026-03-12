@@ -1,4 +1,11 @@
 {
+  "benchmark_status": {
+    "energy_counter": 12.0,
+    "energy_maxit": 100.0,
+    "energy_max_energy_error": 1.0,
+    "energy_converged": true,
+    "energy_hit_max_iterations": false
+  },
   "leaf": {
     "refl": {
       "max_abs": 7.688294445529209e-15,
