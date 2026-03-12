@@ -1,13 +1,15 @@
 from __future__ import annotations
 
-from typing import Dict, Mapping, Optional
+from collections import Counter
+from typing import Dict, Mapping, Optional, Sequence
 
 import torch
+import xarray as xr
 
 from ..biochem import BiochemicalOptions, LeafBiochemistryInputs, LeafBiochemistryResult
 from ..canopy.fluorescence import CanopyFluorescenceModel, CanopyFluorescenceResult
 from ..canopy.reflectance import CanopyReflectanceModel, CanopyReflectanceResult
-from ..canopy.thermal import CanopyThermalRadianceModel, CanopyThermalRadianceResult, ThermalOptics
+from ..canopy.thermal import CanopyThermalRadianceModel, CanopyThermalRadianceResult, ThermalOptics, default_thermal_wavelengths
 from ..energy import (
     CanopyEnergyBalanceResult,
     CanopyEnergyBalanceModel,
@@ -143,6 +145,22 @@ class ScopeGridRunner:
 
         return {name: torch.cat(chunks, dim=0) for name, chunks in outputs.items()}
 
+    def run_dataset(
+        self,
+        data_module: ScopeGridDataModule,
+        *,
+        varmap: Mapping[str, str],
+        hotspot_var: Optional[str] = None,
+        nlayers: Optional[int] = None,
+    ) -> xr.Dataset:
+        outputs = self.run(
+            data_module,
+            varmap=varmap,
+            hotspot_var=hotspot_var,
+            nlayers=nlayers,
+        )
+        return self._outputs_to_dataset(data_module, outputs, product="reflectance")
+
     def run_biochemical_fluorescence(
         self,
         data_module: ScopeGridDataModule,
@@ -208,6 +226,24 @@ class ScopeGridRunner:
                 outputs[f"shaded_{name}"].append(getattr(result.shaded, name))
 
         return {name: torch.cat(chunks, dim=0) for name, chunks in outputs.items()}
+
+    def run_biochemical_fluorescence_dataset(
+        self,
+        data_module: ScopeGridDataModule,
+        *,
+        varmap: Mapping[str, str],
+        biochem_options: Optional[BiochemicalOptions] = None,
+        hotspot_var: Optional[str] = None,
+        nlayers: Optional[int] = None,
+    ) -> xr.Dataset:
+        outputs = self.run_biochemical_fluorescence(
+            data_module,
+            varmap=varmap,
+            biochem_options=biochem_options,
+            hotspot_var=hotspot_var,
+            nlayers=nlayers,
+        )
+        return self._outputs_to_dataset(data_module, outputs, product="biochemical_fluorescence")
 
     def run_energy_balance_fluorescence(
         self,
@@ -315,6 +351,28 @@ class ScopeGridRunner:
 
         return {name: torch.cat(chunks, dim=0) for name, chunks in outputs.items()}
 
+    def run_energy_balance_fluorescence_dataset(
+        self,
+        data_module: ScopeGridDataModule,
+        *,
+        varmap: Mapping[str, str],
+        biochem_options: Optional[BiochemicalOptions] = None,
+        energy_options: Optional[EnergyBalanceOptions] = None,
+        hotspot_var: Optional[str] = None,
+        nlayers: Optional[int] = None,
+        soil_heat_method: int = 2,
+    ) -> xr.Dataset:
+        outputs = self.run_energy_balance_fluorescence(
+            data_module,
+            varmap=varmap,
+            biochem_options=biochem_options,
+            energy_options=energy_options,
+            hotspot_var=hotspot_var,
+            nlayers=nlayers,
+            soil_heat_method=soil_heat_method,
+        )
+        return self._outputs_to_dataset(data_module, outputs, product="energy_balance_fluorescence")
+
     def run_energy_balance_thermal(
         self,
         data_module: ScopeGridDataModule,
@@ -421,6 +479,28 @@ class ScopeGridRunner:
 
         return {name: torch.cat(chunks, dim=0) for name, chunks in outputs.items()}
 
+    def run_energy_balance_thermal_dataset(
+        self,
+        data_module: ScopeGridDataModule,
+        *,
+        varmap: Mapping[str, str],
+        biochem_options: Optional[BiochemicalOptions] = None,
+        energy_options: Optional[EnergyBalanceOptions] = None,
+        hotspot_var: Optional[str] = None,
+        nlayers: Optional[int] = None,
+        soil_heat_method: int = 2,
+    ) -> xr.Dataset:
+        outputs = self.run_energy_balance_thermal(
+            data_module,
+            varmap=varmap,
+            biochem_options=biochem_options,
+            energy_options=energy_options,
+            hotspot_var=hotspot_var,
+            nlayers=nlayers,
+            soil_heat_method=soil_heat_method,
+        )
+        return self._outputs_to_dataset(data_module, outputs, product="energy_balance_thermal")
+
     def run_fluorescence(
         self,
         data_module: ScopeGridDataModule,
@@ -457,6 +537,20 @@ class ScopeGridRunner:
                 outputs[name].append(getattr(result, name))
 
         return {name: torch.cat(chunks, dim=0) for name, chunks in outputs.items()}
+
+    def run_fluorescence_dataset(
+        self,
+        data_module: ScopeGridDataModule,
+        *,
+        varmap: Mapping[str, str],
+        hotspot_var: Optional[str] = None,
+    ) -> xr.Dataset:
+        outputs = self.run_fluorescence(
+            data_module,
+            varmap=varmap,
+            hotspot_var=hotspot_var,
+        )
+        return self._outputs_to_dataset(data_module, outputs, product="fluorescence")
 
     def run_layered_fluorescence(
         self,
@@ -503,6 +597,22 @@ class ScopeGridRunner:
 
         return {name: torch.cat(chunks, dim=0) for name, chunks in outputs.items()}
 
+    def run_layered_fluorescence_dataset(
+        self,
+        data_module: ScopeGridDataModule,
+        *,
+        varmap: Mapping[str, str],
+        hotspot_var: Optional[str] = None,
+        nlayers: Optional[int] = None,
+    ) -> xr.Dataset:
+        outputs = self.run_layered_fluorescence(
+            data_module,
+            varmap=varmap,
+            hotspot_var=hotspot_var,
+            nlayers=nlayers,
+        )
+        return self._outputs_to_dataset(data_module, outputs, product="layered_fluorescence")
+
     def run_thermal(
         self,
         data_module: ScopeGridDataModule,
@@ -548,6 +658,181 @@ class ScopeGridRunner:
                 outputs[name].append(getattr(result, name))
 
         return {name: torch.cat(chunks, dim=0) for name, chunks in outputs.items()}
+
+    def run_thermal_dataset(
+        self,
+        data_module: ScopeGridDataModule,
+        *,
+        varmap: Mapping[str, str],
+        hotspot_var: Optional[str] = None,
+        nlayers: Optional[int] = None,
+    ) -> xr.Dataset:
+        outputs = self.run_thermal(
+            data_module,
+            varmap=varmap,
+            hotspot_var=hotspot_var,
+            nlayers=nlayers,
+        )
+        return self._outputs_to_dataset(data_module, outputs, product="thermal")
+
+    def _outputs_to_dataset(
+        self,
+        data_module: ScopeGridDataModule,
+        outputs: Mapping[str, torch.Tensor],
+        *,
+        product: str,
+    ) -> xr.Dataset:
+        dataset_outputs = {name: self._dataset_tensor(value) for name, value in outputs.items()}
+        layer_count = self._output_layer_count(data_module, dataset_outputs)
+        variable_dims = {
+            name: self._infer_output_dims(name, tensor, layer_count=layer_count)
+            for name, tensor in dataset_outputs.items()
+        }
+        variable_coords = self._output_coords(layer_count)
+        return data_module.assemble_dataset(
+            dataset_outputs,
+            variable_dims=variable_dims,
+            variable_coords=variable_coords,
+            attrs={"scope_torch_product": product},
+        )
+
+    def _dataset_tensor(self, value: torch.Tensor) -> torch.Tensor:
+        tensor = torch.as_tensor(value)
+        if tensor.ndim == 3 and tensor.shape[1] == 1:
+            spectral_sizes = self._spectral_sizes()
+            if int(tensor.shape[2]) in spectral_sizes:
+                return tensor.squeeze(1)
+        return tensor
+
+    def _output_coords(self, layer_count: Optional[int]) -> Dict[str, torch.Tensor]:
+        coords: Dict[str, torch.Tensor] = {
+            "wavelength": self.fluspect.spectral.wlP,
+            "thermal_wavelength": default_thermal_wavelengths(
+                device=self.fluspect.device,
+                dtype=self.fluspect.dtype,
+            ),
+        }
+        if self.fluspect.spectral.wlF is not None:
+            coords["fluorescence_wavelength"] = self.fluspect.spectral.wlF
+        if self.fluspect.spectral.wlE is not None:
+            coords["excitation_wavelength"] = self.fluspect.spectral.wlE
+        if layer_count is not None:
+            coords["layer_interface"] = torch.arange(
+                layer_count + 1,
+                device=self.fluspect.device,
+                dtype=self.fluspect.dtype,
+            )
+        return coords
+
+    def _output_layer_count(
+        self,
+        data_module: ScopeGridDataModule,
+        outputs: Mapping[str, torch.Tensor],
+    ) -> Optional[int]:
+        if "layer" in data_module.dataset.coords:
+            return int(data_module.dataset.coords["layer"].size)
+
+        spectral_sizes = self._spectral_sizes()
+        layer_votes: Counter[int] = Counter()
+        interface_votes: Counter[int] = Counter()
+
+        for name, value in outputs.items():
+            tensor = torch.as_tensor(value)
+            if tensor.ndim == 2:
+                candidate = int(tensor.shape[1])
+                if candidate > 0 and candidate not in spectral_sizes:
+                    layer_votes[candidate] += 1
+                continue
+            if tensor.ndim < 3:
+                continue
+
+            leading = int(tensor.shape[1])
+            trailing = int(tensor.shape[-1])
+            if leading > 0 and trailing in spectral_sizes:
+                layer_votes[leading] += 1
+            if name in {"Emint_", "Eplut_", "Fmin_", "Fplu_"} and leading > 1:
+                interface_votes[leading - 1] += 1
+
+        if layer_votes:
+            return layer_votes.most_common(1)[0][0]
+        if interface_votes:
+            return interface_votes.most_common(1)[0][0]
+        return None
+
+    def _spectral_sizes(self) -> set[int]:
+        spectral_sizes = {
+            int(self.fluspect.spectral.wlP.numel()),
+            int(default_thermal_wavelengths(device=self.fluspect.device, dtype=self.fluspect.dtype).numel()),
+        }
+        if self.fluspect.spectral.wlF is not None:
+            spectral_sizes.add(int(self.fluspect.spectral.wlF.numel()))
+        if self.fluspect.spectral.wlE is not None:
+            spectral_sizes.add(int(self.fluspect.spectral.wlE.numel()))
+        return spectral_sizes
+
+    def _infer_output_dims(
+        self,
+        name: str,
+        tensor: torch.Tensor,
+        *,
+        layer_count: Optional[int],
+    ) -> tuple[str, ...]:
+        trailing = tuple(int(size) for size in torch.as_tensor(tensor).shape[1:])
+        if not trailing:
+            return ()
+
+        wlP = int(self.fluspect.spectral.wlP.numel())
+        wlF = int(self.fluspect.spectral.wlF.numel()) if self.fluspect.spectral.wlF is not None else None
+        wlE = int(self.fluspect.spectral.wlE.numel()) if self.fluspect.spectral.wlE is not None else None
+        wlT = int(default_thermal_wavelengths(device=self.fluspect.device, dtype=self.fluspect.dtype).numel())
+
+        if len(trailing) == 1:
+            size = trailing[0]
+            if size == wlP:
+                return ("wavelength",)
+            if wlF is not None and size == wlF:
+                return ("fluorescence_wavelength",)
+            if wlE is not None and size == wlE:
+                return ("excitation_wavelength",)
+            if size == wlT:
+                return ("thermal_wavelength",)
+            if layer_count is not None and size == layer_count:
+                return ("layer",)
+            return (f"{name}_dim_1",)
+
+        if len(trailing) == 2:
+            first, second = trailing
+            if second == wlT:
+                if layer_count is not None and first == layer_count + 1:
+                    return ("layer_interface", "thermal_wavelength")
+                if layer_count is not None and first == layer_count:
+                    return ("layer", "thermal_wavelength")
+                return (f"{name}_dim_1", "thermal_wavelength")
+            if second == wlP:
+                if layer_count is not None and first == layer_count + 1:
+                    return ("layer_interface", "wavelength")
+                if layer_count is not None and first == layer_count:
+                    return ("layer", "wavelength")
+                return (f"{name}_dim_1", "wavelength")
+            if wlF is not None and second == wlF:
+                if layer_count is not None and first == layer_count + 1:
+                    return ("layer_interface", "fluorescence_wavelength")
+                if layer_count is not None and first == layer_count:
+                    return ("layer", "fluorescence_wavelength")
+                return (f"{name}_dim_1", "fluorescence_wavelength")
+            if wlE is not None and second == wlE:
+                if layer_count is not None and first == layer_count + 1:
+                    return ("layer_interface", "excitation_wavelength")
+                if layer_count is not None and first == layer_count:
+                    return ("layer", "excitation_wavelength")
+                return (f"{name}_dim_1", "excitation_wavelength")
+            if layer_count is not None and first == layer_count + 1:
+                return ("layer_interface", f"{name}_dim_2")
+            if layer_count is not None and first == layer_count:
+                return ("layer", f"{name}_dim_2")
+            return (f"{name}_dim_1", f"{name}_dim_2")
+
+        return tuple(f"{name}_dim_{idx}" for idx in range(1, len(trailing) + 1))
 
     def _leafbio_kwargs(self, batch: Mapping[str, torch.Tensor], varmap: Mapping[str, str]) -> Dict[str, torch.Tensor]:
         kwargs: Dict[str, torch.Tensor] = {}
