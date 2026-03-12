@@ -3,10 +3,17 @@ import pandas as pd
 import torch
 import xarray as xr
 
-from scope_torch.biochem import LeafBiochemistryInputs
+from scope_torch.biochem import LeafBiochemistryInputs, LeafBiochemistryResult
 from scope_torch.canopy.foursail import FourSAILModel, campbell_lidf
 from scope_torch.canopy.fluorescence import CanopyFluorescenceModel, CanopyFluorescenceResult
 from scope_torch.canopy.reflectance import CanopyReflectanceModel
+from scope_torch.energy import (
+    CanopyEnergyBalanceResult,
+    EnergyBalanceCanopy,
+    EnergyBalanceMeteo,
+    EnergyBalanceOptions,
+    EnergyBalanceSoil,
+)
 from scope_torch.canopy.thermal import CanopyThermalRadianceModel
 from scope_torch.config import SimulationConfig
 from scope_torch.data import ScopeGridDataModule
@@ -92,7 +99,7 @@ def test_scope_grid_runner_matches_manual():
         coords={"y": y, "x": x, "time": times, "wavelength": np.arange(nwl)},
     )
 
-    cfg = SimulationConfig(roi_bounds=(0, 0, 1, 1), start_time=times[0], end_time=times[-1], chunk_size=2)
+    cfg = SimulationConfig(roi_bounds=(0, 0, 1, 1), start_time=times[0], end_time=times[-1], device=str(device), dtype=dtype, chunk_size=2)
     module = ScopeGridDataModule(data, cfg, required_vars=["Cab", "Cw", "Cdm", "LAI", "tts", "tto", "psi", "soil_refl"])
     runner = ScopeGridRunner(fluspect, sail, lidf=lidf)
     outputs = runner.run(
@@ -164,7 +171,7 @@ def test_scope_grid_runner_fluorescence_matches_manual():
         coords={"y": y, "x": x, "time": times, "excitation_wavelength": np.arange(n_wle)},
     )
 
-    cfg = SimulationConfig(roi_bounds=(0, 0, 1, 1), start_time=times[0], end_time=times[-1], chunk_size=2)
+    cfg = SimulationConfig(roi_bounds=(0, 0, 1, 1), start_time=times[0], end_time=times[-1], device=str(device), dtype=dtype, chunk_size=2)
     module = ScopeGridDataModule(
         data,
         cfg,
@@ -246,7 +253,7 @@ def test_scope_grid_runner_layered_fluorescence_matches_manual():
         coords={"y": y, "x": x, "time": times, "excitation_wavelength": np.arange(n_wle), "layer": layers},
     )
 
-    cfg = SimulationConfig(roi_bounds=(0, 0, 1, 1), start_time=times[0], end_time=times[-1], chunk_size=2)
+    cfg = SimulationConfig(roi_bounds=(0, 0, 1, 1), start_time=times[0], end_time=times[-1], device=str(device), dtype=dtype, chunk_size=2)
     module = ScopeGridDataModule(
         data,
         cfg,
@@ -327,7 +334,7 @@ def test_scope_grid_runner_thermal_matches_manual():
         coords={"y": y, "x": x, "time": times, "layer": layers},
     )
 
-    cfg = SimulationConfig(roi_bounds=(0, 0, 1, 1), start_time=times[0], end_time=times[-1], chunk_size=2)
+    cfg = SimulationConfig(roi_bounds=(0, 0, 1, 1), start_time=times[0], end_time=times[-1], device=str(device), dtype=dtype, chunk_size=2)
     module = ScopeGridDataModule(data, cfg, required_vars=["LAI", "tts", "tto", "psi", "Tcu", "Tch", "Tsu", "Tsh"])
     outputs = runner.run_thermal(
         module,
@@ -411,7 +418,7 @@ def test_scope_grid_runner_biochemical_fluorescence_matches_manual():
         coords={"y": y, "x": x, "time": times, "excitation_wavelength": np.arange(n_wle), "layer": layers},
     )
 
-    cfg = SimulationConfig(roi_bounds=(0, 0, 1, 1), start_time=times[0], end_time=times[-1], chunk_size=2)
+    cfg = SimulationConfig(roi_bounds=(0, 0, 1, 1), start_time=times[0], end_time=times[-1], device=str(device), dtype=dtype, chunk_size=2)
     module = ScopeGridDataModule(
         data,
         cfg,
@@ -560,7 +567,7 @@ def test_scope_grid_runner_from_scope_assets_resolves_soil_spectrum():
         coords={"y": y, "x": x, "time": times},
     )
 
-    cfg = SimulationConfig(roi_bounds=(0, 0, 1, 1), start_time=times[0], end_time=times[-1], chunk_size=2)
+    cfg = SimulationConfig(roi_bounds=(0, 0, 1, 1), start_time=times[0], end_time=times[-1], device=str(device), dtype=dtype, chunk_size=2)
     module = ScopeGridDataModule(data, cfg, required_vars=["Cab", "Cw", "Cdm", "LAI", "tts", "tto", "psi", "soil_spectrum"])
     outputs = runner.run(
         module,
@@ -630,7 +637,7 @@ def test_scope_grid_runner_from_scope_assets_resolves_bsm_soil_parameters():
         coords={"y": y, "x": x, "time": times},
     )
 
-    cfg = SimulationConfig(roi_bounds=(0, 0, 1, 1), start_time=times[0], end_time=times[-1], chunk_size=2)
+    cfg = SimulationConfig(roi_bounds=(0, 0, 1, 1), start_time=times[0], end_time=times[-1], device=str(device), dtype=dtype, chunk_size=2)
     module = ScopeGridDataModule(
         data,
         cfg,
@@ -688,6 +695,191 @@ def test_scope_grid_runner_from_scope_assets_resolves_bsm_soil_parameters():
         )
         for key in manual_outputs:
             manual_outputs[key].append(getattr(reflectance_out, key))
+
+    for key, values in manual_outputs.items():
+        assert torch.allclose(outputs[key], torch.cat(values, dim=0))
+
+
+def test_scope_grid_runner_energy_balance_fluorescence_matches_manual():
+    device = torch.device("cpu")
+    dtype = torch.float64
+    spectral = _spectral(device, dtype)
+    optipar = _optipar(spectral)
+    fluspect = FluspectModel(spectral, optipar, dtype=dtype)
+    lidf = campbell_lidf(57.0, device=device, dtype=dtype)
+    sail = FourSAILModel(lidf=lidf)
+    runner = ScopeGridRunner(fluspect, sail, lidf=lidf)
+
+    times = pd.date_range("2020-07-01", periods=2, freq="h")
+    y = np.arange(1)
+    x = np.arange(1)
+    data = xr.Dataset(
+        {
+            "Cab": (("y", "x", "time"), np.full((1, 1, 2), 45.0)),
+            "Cw": (("y", "x", "time"), np.full((1, 1, 2), 0.01)),
+            "Cdm": (("y", "x", "time"), np.full((1, 1, 2), 0.012)),
+            "fqe": (("y", "x", "time"), np.full((1, 1, 2), 0.01)),
+            "LAI": (("y", "x", "time"), np.array([[[2.3, 2.6]]])),
+            "tts": (("y", "x", "time"), np.full((1, 1, 2), 30.0)),
+            "tto": (("y", "x", "time"), np.full((1, 1, 2), 15.0)),
+            "psi": (("y", "x", "time"), np.array([[[10.0, 20.0]]])),
+            "soil_refl": (("y", "x", "time", "wavelength"), np.full((1, 1, 2, spectral.wlP.numel()), 0.2)),
+            "Esun_sw": (("y", "x", "time", "wavelength"), np.full((1, 1, 2, spectral.wlP.numel()), 1200.0)),
+            "Esky_sw": (("y", "x", "time", "wavelength"), np.full((1, 1, 2, spectral.wlP.numel()), 180.0)),
+            "Ta": (("y", "x", "time"), np.full((1, 1, 2), 25.0)),
+            "ea": (("y", "x", "time"), np.full((1, 1, 2), 20.0)),
+            "Ca": (("y", "x", "time"), np.full((1, 1, 2), 390.0)),
+            "Oa": (("y", "x", "time"), np.full((1, 1, 2), 209.0)),
+            "p": (("y", "x", "time"), np.full((1, 1, 2), 970.0)),
+            "z": (("y", "x", "time"), np.full((1, 1, 2), 10.0)),
+            "u": (("y", "x", "time"), np.full((1, 1, 2), 2.0)),
+            "Cd": (("y", "x", "time"), np.full((1, 1, 2), 0.2)),
+            "rwc": (("y", "x", "time"), np.full((1, 1, 2), 0.5)),
+            "z0m": (("y", "x", "time"), np.full((1, 1, 2), 0.15)),
+            "d": (("y", "x", "time"), np.full((1, 1, 2), 1.3)),
+            "h": (("y", "x", "time"), np.full((1, 1, 2), 2.0)),
+            "kV": (("y", "x", "time"), np.full((1, 1, 2), 0.15)),
+            "rss": (("y", "x", "time"), np.full((1, 1, 2), 120.0)),
+            "rbs": (("y", "x", "time"), np.full((1, 1, 2), 12.0)),
+            "Vcmax25": (("y", "x", "time"), np.full((1, 1, 2), 70.0)),
+            "BallBerrySlope": (("y", "x", "time"), np.full((1, 1, 2), 9.0)),
+        },
+        coords={"y": y, "x": x, "time": times, "wavelength": np.arange(spectral.wlP.numel())},
+    )
+
+    cfg = SimulationConfig(roi_bounds=(0, 0, 1, 1), start_time=times[0], end_time=times[-1], device=str(device), dtype=dtype, chunk_size=2)
+    module = ScopeGridDataModule(
+        data,
+        cfg,
+        required_vars=[
+            "Cab",
+            "Cw",
+            "Cdm",
+            "fqe",
+            "LAI",
+            "tts",
+            "tto",
+            "psi",
+            "soil_refl",
+            "Esun_sw",
+            "Esky_sw",
+            "Ta",
+            "ea",
+            "Ca",
+            "Oa",
+            "p",
+            "z",
+            "u",
+            "Cd",
+            "rwc",
+            "z0m",
+            "d",
+            "h",
+            "kV",
+            "rss",
+            "rbs",
+            "Vcmax25",
+            "BallBerrySlope",
+        ],
+    )
+    outputs = runner.run_energy_balance_fluorescence(
+        module,
+        varmap={
+            "Cab": "Cab",
+            "Cw": "Cw",
+            "Cdm": "Cdm",
+            "fqe": "fqe",
+            "LAI": "LAI",
+            "tts": "tts",
+            "tto": "tto",
+            "psi": "psi",
+            "soil_refl": "soil_refl",
+            "Esun_sw": "Esun_sw",
+            "Esky_sw": "Esky_sw",
+            "Ta": "Ta",
+            "ea": "ea",
+            "Ca": "Ca",
+            "Oa": "Oa",
+            "p": "p",
+            "z": "z",
+            "u": "u",
+            "Cd": "Cd",
+            "rwc": "rwc",
+            "z0m": "z0m",
+            "d": "d",
+            "h": "h",
+            "kV": "kV",
+            "rss": "rss",
+            "rbs": "rbs",
+            "Vcmax25": "Vcmax25",
+            "BallBerrySlope": "BallBerrySlope",
+        },
+        energy_options=EnergyBalanceOptions(max_iter=50),
+        nlayers=4,
+    )
+
+    physiology_fields = [name for name in LeafBiochemistryResult.__dataclass_fields__ if name != "fcount"]
+    energy_fields = [name for name in CanopyEnergyBalanceResult.__dataclass_fields__ if name not in {"sunlit", "shaded", "Tsold"}]
+    stacked = data.stack(batch=("y", "x", "time"))
+    manual_outputs: dict[str, list[torch.Tensor]] = {
+        **{name: [] for name in CanopyFluorescenceResult.__dataclass_fields__},
+        **{name: [] for name in energy_fields},
+        **{f"sunlit_{name}": [] for name in physiology_fields},
+        **{f"shaded_{name}": [] for name in physiology_fields},
+    }
+    for label in stacked["Cab"].indexes["batch"]:
+        idx = dict(batch=label)
+        leafbio = LeafBioBatch(
+            Cab=torch.tensor([float(stacked["Cab"].sel(**idx))], device=device, dtype=dtype),
+            Cw=torch.tensor([float(stacked["Cw"].sel(**idx))], device=device, dtype=dtype),
+            Cdm=torch.tensor([float(stacked["Cdm"].sel(**idx))], device=device, dtype=dtype),
+            fqe=torch.tensor([float(stacked["fqe"].sel(**idx))], device=device, dtype=dtype),
+        )
+        biochem = LeafBiochemistryInputs(
+            Vcmax25=torch.tensor([float(stacked["Vcmax25"].sel(**idx))], device=device, dtype=dtype),
+            BallBerrySlope=torch.tensor([float(stacked["BallBerrySlope"].sel(**idx))], device=device, dtype=dtype),
+        )
+        result = runner.energy_balance_model.solve_fluorescence(
+            leafbio,
+            biochem,
+            torch.tensor(stacked["soil_refl"].sel(**idx).values, device=device, dtype=dtype).unsqueeze(0),
+            torch.tensor([float(stacked["LAI"].sel(**idx))], device=device, dtype=dtype),
+            torch.tensor([float(stacked["tts"].sel(**idx))], device=device, dtype=dtype),
+            torch.tensor([float(stacked["tto"].sel(**idx))], device=device, dtype=dtype),
+            torch.tensor([float(stacked["psi"].sel(**idx))], device=device, dtype=dtype),
+            torch.tensor(stacked["Esun_sw"].sel(**idx).values, device=device, dtype=dtype).unsqueeze(0),
+            torch.tensor(stacked["Esky_sw"].sel(**idx).values, device=device, dtype=dtype).unsqueeze(0),
+            meteo=EnergyBalanceMeteo(
+                Ta=torch.tensor([float(stacked["Ta"].sel(**idx))], device=device, dtype=dtype),
+                ea=torch.tensor([float(stacked["ea"].sel(**idx))], device=device, dtype=dtype),
+                Ca=torch.tensor([float(stacked["Ca"].sel(**idx))], device=device, dtype=dtype),
+                Oa=torch.tensor([float(stacked["Oa"].sel(**idx))], device=device, dtype=dtype),
+                p=torch.tensor([float(stacked["p"].sel(**idx))], device=device, dtype=dtype),
+                z=torch.tensor([float(stacked["z"].sel(**idx))], device=device, dtype=dtype),
+                u=torch.tensor([float(stacked["u"].sel(**idx))], device=device, dtype=dtype),
+            ),
+            canopy=EnergyBalanceCanopy(
+                Cd=torch.tensor([float(stacked["Cd"].sel(**idx))], device=device, dtype=dtype),
+                rwc=torch.tensor([float(stacked["rwc"].sel(**idx))], device=device, dtype=dtype),
+                z0m=torch.tensor([float(stacked["z0m"].sel(**idx))], device=device, dtype=dtype),
+                d=torch.tensor([float(stacked["d"].sel(**idx))], device=device, dtype=dtype),
+                h=torch.tensor([float(stacked["h"].sel(**idx))], device=device, dtype=dtype),
+                kV=torch.tensor([float(stacked["kV"].sel(**idx))], device=device, dtype=dtype),
+            ),
+            soil=EnergyBalanceSoil(
+                rss=torch.tensor([float(stacked["rss"].sel(**idx))], device=device, dtype=dtype),
+                rbs=torch.tensor([float(stacked["rbs"].sel(**idx))], device=device, dtype=dtype),
+            ),
+            options=EnergyBalanceOptions(max_iter=50),
+            nlayers=4,
+        )
+        for name in CanopyFluorescenceResult.__dataclass_fields__:
+            manual_outputs[name].append(getattr(result.fluorescence, name))
+        for name in energy_fields:
+            manual_outputs[name].append(getattr(result.energy, name))
+        for name in physiology_fields:
+            manual_outputs[f"sunlit_{name}"].append(getattr(result.energy.sunlit, name))
+            manual_outputs[f"shaded_{name}"].append(getattr(result.energy.shaded, name))
 
     for key, values in manual_outputs.items():
         assert torch.allclose(outputs[key], torch.cat(values, dim=0))

@@ -8,6 +8,14 @@ from ..biochem import BiochemicalOptions, LeafBiochemistryInputs, LeafBiochemist
 from ..canopy.fluorescence import CanopyFluorescenceModel, CanopyFluorescenceResult
 from ..canopy.reflectance import CanopyReflectanceModel, CanopyReflectanceResult
 from ..canopy.thermal import CanopyThermalRadianceModel, CanopyThermalRadianceResult, ThermalOptics
+from ..energy import (
+    CanopyEnergyBalanceResult,
+    CanopyEnergyBalanceModel,
+    EnergyBalanceCanopy,
+    EnergyBalanceMeteo,
+    EnergyBalanceOptions,
+    EnergyBalanceSoil,
+)
 from ..canopy.foursail import FourSAILModel
 from ..spectral.fluspect import FluspectModel, LeafBioBatch
 from ..spectral.loaders import SoilSpectraLibrary, load_fluspect_resources, load_soil_spectra
@@ -47,6 +55,7 @@ class ScopeGridRunner:
         )
         self.fluorescence_model = CanopyFluorescenceModel(self.reflectance_model)
         self.thermal_model = CanopyThermalRadianceModel(self.reflectance_model)
+        self.energy_balance_model = CanopyEnergyBalanceModel(self.reflectance_model)
 
     @classmethod
     def from_scope_assets(
@@ -195,6 +204,112 @@ class ScopeGridRunner:
             for name in physiology_fields:
                 outputs[f"sunlit_{name}"].append(getattr(result.sunlit, name))
                 outputs[f"shaded_{name}"].append(getattr(result.shaded, name))
+
+        return {name: torch.cat(chunks, dim=0) for name, chunks in outputs.items()}
+
+    def run_energy_balance_fluorescence(
+        self,
+        data_module: ScopeGridDataModule,
+        *,
+        varmap: Mapping[str, str],
+        biochem_options: Optional[BiochemicalOptions] = None,
+        energy_options: Optional[EnergyBalanceOptions] = None,
+        hotspot_var: Optional[str] = None,
+        nlayers: Optional[int] = None,
+        soil_heat_method: int = 2,
+    ) -> Dict[str, torch.Tensor]:
+        physiology_fields = [name for name in LeafBiochemistryResult.__dataclass_fields__ if name != "fcount"]
+        energy_fields = [name for name in CanopyEnergyBalanceResult.__dataclass_fields__ if name not in {"sunlit", "shaded", "Tsold"}]
+        outputs: dict[str, list[torch.Tensor]] = {
+            **{name: [] for name in CanopyFluorescenceResult.__dataclass_fields__},
+            **{name: [] for name in energy_fields},
+            **{f"sunlit_{name}": [] for name in physiology_fields},
+            **{f"shaded_{name}": [] for name in physiology_fields},
+        }
+        for batch in data_module.iter_batches():
+            leaf_kwargs = self._leafbio_kwargs(batch, varmap)
+            leafbio = LeafBioBatch(**leaf_kwargs)
+            biochem = LeafBiochemistryInputs(**self._biochemistry_kwargs(batch, varmap))
+            lai = batch[varmap["LAI"]]
+            tts = batch[varmap["tts"]]
+            tto = batch[varmap["tto"]]
+            psi = batch[varmap["psi"]]
+            Esun_sw = self._spectral_input(batch, varmap, "Esun_sw")
+            Esky_sw = self._spectral_input(batch, varmap, "Esky_sw")
+            soil_refl = self._soil_refl(batch, varmap)
+            if hotspot_var and hotspot_var in batch:
+                hotspot = batch[hotspot_var]
+            else:
+                hotspot = torch.full_like(lai, self.default_hotspot)
+
+            meteo = EnergyBalanceMeteo(
+                Ta=batch[varmap["Ta"]],
+                ea=batch[varmap["ea"]],
+                Ca=batch[varmap["Ca"]],
+                Oa=batch[varmap["Oa"]],
+                p=batch[varmap["p"]],
+                z=batch[varmap["z"]],
+                u=batch[varmap["u"]],
+                L=batch[varmap["L"]] if "L" in varmap and varmap["L"] in batch else -1e6,
+            )
+            canopy = EnergyBalanceCanopy(
+                Cd=batch[varmap["Cd"]],
+                rwc=batch[varmap["rwc"]],
+                z0m=batch[varmap["z0m"]],
+                d=batch[varmap["d"]],
+                h=batch[varmap["h"]],
+                kV=batch[varmap["kV"]] if "kV" in varmap and varmap["kV"] in batch else 0.0,
+                fV=batch[varmap["fV"]] if "fV" in varmap and varmap["fV"] in batch else None,
+            )
+            soil = EnergyBalanceSoil(
+                rss=batch[varmap["rss"]],
+                rbs=batch[varmap["rbs"]],
+                thermal_optics=ThermalOptics(
+                    rho_thermal=batch[varmap["rho_thermal"]] if "rho_thermal" in varmap and varmap["rho_thermal"] in batch else 0.01,
+                    tau_thermal=batch[varmap["tau_thermal"]] if "tau_thermal" in varmap and varmap["tau_thermal"] in batch else 0.01,
+                    rs_thermal=batch[varmap["rs_thermal"]] if "rs_thermal" in varmap and varmap["rs_thermal"] in batch else 0.06,
+                ),
+                soil_heat_method=soil_heat_method,
+                GAM=batch[varmap["GAM"]] if "GAM" in varmap and varmap["GAM"] in batch else 0.0,
+                Tsold=batch[varmap["Tsold"]] if "Tsold" in varmap and varmap["Tsold"] in batch else None,
+                dt_seconds=batch[varmap["dt_seconds"]] if "dt_seconds" in varmap and varmap["dt_seconds"] in batch else None,
+            )
+
+            result = self.energy_balance_model.solve_fluorescence(
+                leafbio,
+                biochem,
+                soil_refl,
+                lai,
+                tts,
+                tto,
+                psi,
+                Esun_sw,
+                Esky_sw,
+                meteo=meteo,
+                canopy=canopy,
+                soil=soil,
+                options=energy_options,
+                biochem_options=biochem_options,
+                hotspot=hotspot,
+                nlayers=self._layer_count(
+                    nlayers,
+                    etau=canopy.fV if isinstance(canopy.fV, torch.Tensor) else None,
+                    etah=None,
+                    Tcu=batch[varmap["Tcu0"]] if "Tcu0" in varmap and varmap["Tcu0"] in batch else None,
+                    Tch=batch[varmap["Tch0"]] if "Tch0" in varmap and varmap["Tch0"] in batch else None,
+                ),
+                Tcu0=batch[varmap["Tcu0"]] if "Tcu0" in varmap and varmap["Tcu0"] in batch else None,
+                Tch0=batch[varmap["Tch0"]] if "Tch0" in varmap and varmap["Tch0"] in batch else None,
+                Tsu0=batch[varmap["Tsu0"]] if "Tsu0" in varmap and varmap["Tsu0"] in batch else None,
+                Tsh0=batch[varmap["Tsh0"]] if "Tsh0" in varmap and varmap["Tsh0"] in batch else None,
+            )
+            for name in CanopyFluorescenceResult.__dataclass_fields__:
+                outputs[name].append(getattr(result.fluorescence, name))
+            for name in energy_fields:
+                outputs[name].append(getattr(result.energy, name))
+            for name in physiology_fields:
+                outputs[f"sunlit_{name}"].append(getattr(result.energy.sunlit, name))
+                outputs[f"shaded_{name}"].append(getattr(result.energy.shaded, name))
 
         return {name: torch.cat(chunks, dim=0) for name, chunks in outputs.items()}
 
