@@ -32,6 +32,79 @@ def test_canopy_thermal_radiance_model_outputs_positive_spectra():
     assert torch.all(result.Eoutt > 0)
 
 
+def test_canopy_thermal_profiles_match_layered_outputs():
+    device = torch.device("cpu")
+    dtype = torch.float64
+    lidf = campbell_lidf(57.0, device=device, dtype=dtype)
+    model = CanopyThermalRadianceModel.from_scope_assets(lidf=lidf, device=device, dtype=dtype)
+
+    result = model(
+        torch.tensor([3.0], device=device, dtype=dtype),
+        torch.tensor([30.0], device=device, dtype=dtype),
+        torch.tensor([20.0], device=device, dtype=dtype),
+        torch.tensor([10.0], device=device, dtype=dtype),
+        torch.full((1, 4), 25.0, device=device, dtype=dtype),
+        torch.full((1, 4), 23.0, device=device, dtype=dtype),
+        torch.tensor([27.0], device=device, dtype=dtype),
+        torch.tensor([21.0], device=device, dtype=dtype),
+        nlayers=4,
+    )
+    profiles = model.profiles(
+        torch.tensor([3.0], device=device, dtype=dtype),
+        torch.tensor([30.0], device=device, dtype=dtype),
+        torch.tensor([20.0], device=device, dtype=dtype),
+        torch.tensor([10.0], device=device, dtype=dtype),
+        torch.full((1, 4), 25.0, device=device, dtype=dtype),
+        torch.full((1, 4), 23.0, device=device, dtype=dtype),
+        torch.tensor([27.0], device=device, dtype=dtype),
+        torch.tensor([21.0], device=device, dtype=dtype),
+        nlayers=4,
+    )
+
+    wlT = default_thermal_wavelengths(device=device, dtype=dtype)
+    assert profiles.Ps.shape == (1, 5)
+    assert torch.allclose(profiles.Emint_, result.Emint_, atol=1e-12, rtol=1e-10)
+    assert torch.allclose(profiles.Eplut_, result.Eplut_, atol=1e-12, rtol=1e-10)
+    expected = 0.001 * torch.trapz(result.Eplut_[:, :-1, :], wlT, dim=-1)
+    assert torch.allclose(profiles.layer_thermal_upward, expected, atol=1e-12, rtol=1e-10)
+
+
+def test_canopy_thermal_directional_matches_single_angle_solution():
+    device = torch.device("cpu")
+    dtype = torch.float64
+    lidf = campbell_lidf(57.0, device=device, dtype=dtype)
+    model = CanopyThermalRadianceModel.from_scope_assets(lidf=lidf, device=device, dtype=dtype)
+
+    single = model(
+        torch.tensor([3.0], device=device, dtype=dtype),
+        torch.tensor([30.0], device=device, dtype=dtype),
+        torch.tensor([20.0], device=device, dtype=dtype),
+        torch.tensor([10.0], device=device, dtype=dtype),
+        torch.full((1, 3), 25.0, device=device, dtype=dtype),
+        torch.full((1, 3), 23.0, device=device, dtype=dtype),
+        torch.tensor([27.0], device=device, dtype=dtype),
+        torch.tensor([21.0], device=device, dtype=dtype),
+        nlayers=3,
+    )
+    directional = model.directional(
+        torch.tensor([3.0], device=device, dtype=dtype),
+        torch.tensor([30.0], device=device, dtype=dtype),
+        torch.tensor([20.0], device=device, dtype=dtype),
+        torch.tensor([10.0], device=device, dtype=dtype),
+        torch.full((1, 3), 25.0, device=device, dtype=dtype),
+        torch.full((1, 3), 23.0, device=device, dtype=dtype),
+        torch.tensor([27.0], device=device, dtype=dtype),
+        torch.tensor([21.0], device=device, dtype=dtype),
+        nlayers=3,
+    )
+
+    sigma_sb = torch.as_tensor(5.67e-8, device=device, dtype=dtype)
+    expected_bt = torch.clamp(torch.pi * single.Loutt / sigma_sb, min=0.0) ** 0.25
+    assert directional.Lot_.shape == (1, 1, single.Lot_.shape[-1])
+    assert torch.allclose(directional.Lot_[:, 0, :], single.Lot_, atol=1e-12, rtol=1e-10)
+    assert torch.allclose(directional.BrightnessT[:, 0], expected_bt, atol=1e-12, rtol=1e-10)
+
+
 def test_canopy_thermal_radiance_model_zero_kelvin_offset_behaves():
     device = torch.device("cpu")
     dtype = torch.float64

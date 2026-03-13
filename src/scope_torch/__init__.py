@@ -12,10 +12,23 @@ from .biochem import (
 )
 from .config import SimulationConfig
 from .canopy.foursail import FourSAILModel, FourSAILResult, campbell_lidf, scope_lazitab, scope_lidf, scope_litab
-from .canopy.fluorescence import CanopyBiochemicalFluorescenceResult, CanopyFluorescenceModel, CanopyFluorescenceResult
+from .canopy.fluorescence import (
+    CanopyBiochemicalFluorescenceResult,
+    CanopyDirectionalFluorescenceResult,
+    CanopyFluorescenceModel,
+    CanopyFluorescenceProfileResult,
+    CanopyFluorescenceResult,
+)
 from .canopy.layered_rt import LayerFluxProfiles, LayeredCanopyTransfer, LayeredCanopyTransportModel
-from .canopy.reflectance import CanopyReflectanceModel, CanopyReflectanceResult
+from .canopy.reflectance import (
+    CanopyDirectionalReflectanceResult,
+    CanopyRadiationProfileResult,
+    CanopyReflectanceModel,
+    CanopyReflectanceResult,
+)
 from .canopy.thermal import (
+    CanopyDirectionalThermalResult,
+    CanopyThermalProfileResult,
     CanopyThermalBalanceResult,
     CanopyThermalRadianceModel,
     CanopyThermalRadianceResult,
@@ -81,14 +94,20 @@ __all__ = [
     "FourSAILResult",
     "CanopyFluorescenceModel",
     "CanopyFluorescenceResult",
+    "CanopyFluorescenceProfileResult",
+    "CanopyDirectionalFluorescenceResult",
     "CanopyBiochemicalFluorescenceResult",
     "LayerFluxProfiles",
     "LayeredCanopyTransfer",
     "LayeredCanopyTransportModel",
     "CanopyReflectanceModel",
     "CanopyReflectanceResult",
+    "CanopyRadiationProfileResult",
+    "CanopyDirectionalReflectanceResult",
     "CanopyThermalRadianceModel",
     "CanopyThermalRadianceResult",
+    "CanopyThermalProfileResult",
+    "CanopyDirectionalThermalResult",
     "CanopyThermalBalanceResult",
     "CanopyEnergyBalanceFluorescenceResult",
     "CanopyEnergyBalanceModel",

@@ -47,6 +47,30 @@ class CanopyReflectanceResult:
         )
 
 
+@dataclass(slots=True)
+class CanopyRadiationProfileResult:
+    Ps: torch.Tensor
+    Po: torch.Tensor
+    Pso: torch.Tensor
+    Es_direct_: torch.Tensor
+    Emin_direct_: torch.Tensor
+    Eplu_direct_: torch.Tensor
+    Es_diffuse_: torch.Tensor
+    Emin_diffuse_: torch.Tensor
+    Eplu_diffuse_: torch.Tensor
+    Es_: torch.Tensor
+    Emin_: torch.Tensor
+    Eplu_: torch.Tensor
+
+
+@dataclass(slots=True)
+class CanopyDirectionalReflectanceResult:
+    tto: torch.Tensor
+    psi: torch.Tensor
+    refl_: torch.Tensor
+    rso_: torch.Tensor
+
+
 class CanopyReflectanceModel:
     """Stable SCOPE-facing reflectance wrapper around leaf optics + 4SAIL."""
 
@@ -210,6 +234,117 @@ class CanopyReflectanceModel:
         sail_out.rsot = rtmo_core["rso"]
         return CanopyReflectanceResult.from_components(leafopt, sail_out)
 
+    def profiles(
+        self,
+        leafbio: LeafBioBatch,
+        soil_refl: torch.Tensor,
+        lai: torch.Tensor,
+        tts: torch.Tensor,
+        tto: torch.Tensor,
+        psi: torch.Tensor,
+        Esun_: torch.Tensor,
+        Esky_: torch.Tensor,
+        *,
+        hotspot: Optional[torch.Tensor] = None,
+        lidf: Optional[torch.Tensor] = None,
+        nlayers: Optional[int] = None,
+    ) -> CanopyRadiationProfileResult:
+        leafopt = self.fluspect(leafbio)
+        batch, nwl = leafopt.refl.shape
+        soil = self.sail._ensure_2d(soil_refl, target_shape=leafopt.refl.shape)
+        hotspot_value = hotspot if hotspot is not None else torch.full_like(torch.as_tensor(lai), self.default_hotspot)
+        nl = self._resolve_uniform_nlayers(
+            nlayers=nlayers,
+            lai=lai,
+            batch=batch,
+            device=leafopt.refl.device,
+            dtype=leafopt.refl.dtype,
+        )
+        transfer = self.layered_transport.build(
+            leafopt.refl,
+            leafopt.tran,
+            soil,
+            lai,
+            tts,
+            tto,
+            psi,
+            hotspot=hotspot_value,
+            lidf=self.lidf if lidf is None else lidf,
+            nlayers=nl,
+        )
+        Esun = self._prepare_spectrum(Esun_, batch, nwl, device=leafopt.refl.device, dtype=leafopt.refl.dtype)
+        Esky = self._prepare_spectrum(Esky_, batch, nwl, device=leafopt.refl.device, dtype=leafopt.refl.dtype)
+        direct = self.layered_transport.flux_profiles(transfer, Esun, torch.zeros_like(Esky))
+        diffuse = self.layered_transport.flux_profiles(transfer, torch.zeros_like(Esun), Esky)
+        return CanopyRadiationProfileResult(
+            Ps=transfer.Ps,
+            Po=transfer.Po,
+            Pso=transfer.Pso,
+            Es_direct_=direct.Es_,
+            Emin_direct_=direct.Emin_,
+            Eplu_direct_=direct.Eplu_,
+            Es_diffuse_=diffuse.Es_,
+            Emin_diffuse_=diffuse.Emin_,
+            Eplu_diffuse_=diffuse.Eplu_,
+            Es_=direct.Es_ + diffuse.Es_,
+            Emin_=direct.Emin_ + diffuse.Emin_,
+            Eplu_=direct.Eplu_ + diffuse.Eplu_,
+        )
+
+    def directional(
+        self,
+        leafbio: LeafBioBatch,
+        soil_refl: torch.Tensor,
+        lai: torch.Tensor,
+        tts: torch.Tensor,
+        directional_tto: torch.Tensor,
+        directional_psi: torch.Tensor,
+        Esun_: torch.Tensor,
+        Esky_: torch.Tensor,
+        *,
+        hotspot: Optional[torch.Tensor] = None,
+        lidf: Optional[torch.Tensor] = None,
+        nlayers: Optional[int] = None,
+    ) -> CanopyDirectionalReflectanceResult:
+        device = self.fluspect.device
+        dtype = self.fluspect.dtype
+        tto_angles = torch.as_tensor(directional_tto, device=device, dtype=dtype).reshape(-1)
+        psi_angles = torch.as_tensor(directional_psi, device=device, dtype=dtype).reshape(-1)
+        if tto_angles.shape != psi_angles.shape:
+            raise ValueError("directional_tto and directional_psi must have the same shape")
+
+        soil = self.sail._ensure_2d(soil_refl)
+        batch = soil.shape[0]
+        lai_tensor = self.sail._expand_param(lai, batch, device, dtype)
+        tts_tensor = self.sail._expand_param(tts, batch, device, dtype)
+        hotspot_value = hotspot if hotspot is not None else torch.full_like(lai_tensor, self.default_hotspot)
+        Esun = self._prepare_spectrum(Esun_, batch, self.fluspect.spectral.wlP.numel(), device=device, dtype=dtype)
+        Esky = self._prepare_spectrum(Esky_, batch, self.fluspect.spectral.wlP.numel(), device=device, dtype=dtype)
+
+        refl = []
+        rso = []
+        for idx in range(tto_angles.numel()):
+            result = self(
+                leafbio,
+                soil_refl,
+                lai_tensor,
+                tts_tensor,
+                tto_angles[idx].expand(batch),
+                psi_angles[idx].expand(batch),
+                hotspot=hotspot_value,
+                lidf=lidf,
+                nlayers=nlayers,
+            )
+            refl.append(self._directional_reflectance(result.rso, result.rdo, Esun, Esky).squeeze(1))
+            rso.append(result.rso.squeeze(1))
+
+        return CanopyDirectionalReflectanceResult(
+            tto=tto_angles,
+            psi=psi_angles,
+            refl_=torch.stack(refl, dim=1),
+            rso_=torch.stack(rso, dim=1),
+        )
+
     def _rtmo_optical_reflectance(
         self,
         *,
@@ -274,6 +409,58 @@ class CanopyReflectanceModel:
             outputs["rsod"].append(rsod)
 
         return {name: torch.cat(chunks, dim=0) for name, chunks in outputs.items()}
+
+    def _prepare_spectrum(
+        self,
+        value: torch.Tensor,
+        batch: int,
+        n_wavelength: int,
+        *,
+        device: torch.device,
+        dtype: torch.dtype,
+    ) -> torch.Tensor:
+        tensor = torch.as_tensor(value, device=device, dtype=dtype)
+        if tensor.ndim == 1:
+            tensor = tensor.unsqueeze(0)
+        if tensor.ndim != 2:
+            raise ValueError(f"Spectra must be 1D or 2D, got shape {tuple(tensor.shape)}")
+        if tensor.shape[-1] != n_wavelength:
+            raise ValueError(f"Spectra must have length {n_wavelength}, got {tensor.shape[-1]}")
+        if tensor.shape[0] == 1 and batch != 1:
+            tensor = tensor.expand(batch, -1)
+        elif tensor.shape[0] != batch:
+            raise ValueError("Spectra must broadcast to the batch dimension")
+        return tensor
+
+    def _directional_reflectance(
+        self,
+        rso: torch.Tensor,
+        rdo: torch.Tensor,
+        Esun: torch.Tensor,
+        Esky: torch.Tensor,
+    ) -> torch.Tensor:
+        irradiance = Esun + Esky
+        refl = (rso * Esun + rdo * Esky) / irradiance.clamp(min=1e-12)
+        threshold = 2e-4 * torch.max(Esky, dim=-1, keepdim=True).values
+        output = torch.where(Esky < threshold, rso, refl)
+        if output.ndim == 3 and output.shape[1] == 1:
+            return output.squeeze(1)
+        return output
+
+    def _resolve_uniform_nlayers(
+        self,
+        *,
+        nlayers: Optional[int],
+        lai: torch.Tensor,
+        batch: int,
+        device: torch.device,
+        dtype: torch.dtype,
+    ) -> int:
+        resolved = self._resolve_nlayers(nlayers, lai, batch, device=device, dtype=dtype)
+        unique = torch.unique(resolved)
+        if unique.numel() != 1:
+            raise ValueError("Profile outputs require a uniform nlayers value across the batch")
+        return int(unique.item())
 
     def _resolve_nlayers(
         self,

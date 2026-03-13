@@ -51,6 +51,23 @@ class CanopyBiochemicalFluorescenceResult:
 
 
 @dataclass(slots=True)
+class CanopyFluorescenceProfileResult:
+    Ps: torch.Tensor
+    Po: torch.Tensor
+    Pso: torch.Tensor
+    Fmin_: torch.Tensor
+    Fplu_: torch.Tensor
+    layer_fluorescence: torch.Tensor
+
+
+@dataclass(slots=True)
+class CanopyDirectionalFluorescenceResult:
+    tto: torch.Tensor
+    psi: torch.Tensor
+    LoF_: torch.Tensor
+
+
+@dataclass(slots=True)
 class _LayeredFluorescenceDiagnostics:
     leaf_fluor_back: torch.Tensor
     leaf_fluor_forw: torch.Tensor
@@ -399,6 +416,124 @@ class CanopyFluorescenceModel:
             EoutF=EoutF,
             Fmin_=diagnostics.Fmin_,
             Fplu_=diagnostics.Fplu_,
+        )
+
+    def profiles(
+        self,
+        leafbio: LeafBioBatch,
+        soil_refl: torch.Tensor,
+        lai: torch.Tensor,
+        tts: torch.Tensor,
+        tto: torch.Tensor,
+        psi: torch.Tensor,
+        Esun_: torch.Tensor,
+        Esky_: torch.Tensor,
+        *,
+        etau: Optional[torch.Tensor] = None,
+        etah: Optional[torch.Tensor] = None,
+        hotspot: Optional[torch.Tensor] = None,
+        lidf: Optional[torch.Tensor] = None,
+        nlayers: Optional[int] = None,
+    ) -> CanopyFluorescenceProfileResult:
+        result = self.layered(
+            leafbio,
+            soil_refl,
+            lai,
+            tts,
+            tto,
+            psi,
+            Esun_,
+            Esky_,
+            etau=etau,
+            etah=etah,
+            hotspot=hotspot,
+            lidf=lidf,
+            nlayers=nlayers,
+        )
+        leafopt = self._rtmf_fluspect(leafbio)
+        wlP = self._rtmf_fluspect.spectral.wlP
+        wlF = self._rtmf_fluspect.spectral.wlF
+        if wlF is None:
+            raise ValueError("Spectral grids must define fluorescence wavelengths")
+        nl = self._resolve_nlayers(nlayers, etau=etau, etah=etah)
+        hotspot_value = hotspot if hotspot is not None else torch.full_like(torch.as_tensor(lai), self.reflectance_model.default_hotspot)
+        rho_f = self._sample_spectrum(leafopt.refl, wlP, wlF)
+        tau_f = self._sample_spectrum(leafopt.tran, wlP, wlF)
+        soil_f = self._sample_spectrum(soil_refl, wlP, wlF)
+        transfer = self.layered_transport.build(
+            rho_f,
+            tau_f,
+            soil_f,
+            lai,
+            tts,
+            tto,
+            psi,
+            hotspot=hotspot_value,
+            lidf=self.reflectance_model.lidf if lidf is None else lidf,
+            nlayers=nl,
+        )
+        return CanopyFluorescenceProfileResult(
+            Ps=transfer.Ps,
+            Po=transfer.Po,
+            Pso=transfer.Pso,
+            Fmin_=result.Fmin_,
+            Fplu_=result.Fplu_,
+            layer_fluorescence=0.001 * torch.trapz(result.Fplu_[:, :-1, :], wlF, dim=-1),
+        )
+
+    def directional(
+        self,
+        leafbio: LeafBioBatch,
+        soil_refl: torch.Tensor,
+        lai: torch.Tensor,
+        tts: torch.Tensor,
+        directional_tto: torch.Tensor,
+        directional_psi: torch.Tensor,
+        Esun_: torch.Tensor,
+        Esky_: torch.Tensor,
+        *,
+        etau: Optional[torch.Tensor] = None,
+        etah: Optional[torch.Tensor] = None,
+        hotspot: Optional[torch.Tensor] = None,
+        lidf: Optional[torch.Tensor] = None,
+        nlayers: Optional[int] = None,
+    ) -> CanopyDirectionalFluorescenceResult:
+        device = self.reflectance_model.fluspect.device
+        dtype = self.reflectance_model.fluspect.dtype
+        tto_angles = torch.as_tensor(directional_tto, device=device, dtype=dtype).reshape(-1)
+        psi_angles = torch.as_tensor(directional_psi, device=device, dtype=dtype).reshape(-1)
+        if tto_angles.shape != psi_angles.shape:
+            raise ValueError("directional_tto and directional_psi must have the same shape")
+
+        soil = self.reflectance_model.sail._ensure_2d(soil_refl)
+        batch = soil.shape[0]
+        lai_tensor = self.reflectance_model.sail._expand_param(lai, batch, device, dtype)
+        tts_tensor = self.reflectance_model.sail._expand_param(tts, batch, device, dtype)
+        hotspot_value = hotspot if hotspot is not None else torch.full_like(lai_tensor, self.reflectance_model.default_hotspot)
+
+        directional_lof = []
+        for idx in range(tto_angles.numel()):
+            result = self.layered(
+                leafbio,
+                soil_refl,
+                lai_tensor,
+                tts_tensor,
+                tto_angles[idx].expand(batch),
+                psi_angles[idx].expand(batch),
+                Esun_,
+                Esky_,
+                etau=etau,
+                etah=etah,
+                hotspot=hotspot_value,
+                lidf=lidf,
+                nlayers=nlayers,
+            )
+            directional_lof.append(result.LoF_)
+
+        return CanopyDirectionalFluorescenceResult(
+            tto=tto_angles,
+            psi=psi_angles,
+            LoF_=torch.stack(directional_lof, dim=1),
         )
 
     def _layered_diagnostics(

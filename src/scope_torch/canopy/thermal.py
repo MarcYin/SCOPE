@@ -42,6 +42,24 @@ class CanopyThermalBalanceResult:
     canopyemis: torch.Tensor
 
 
+@dataclass(slots=True)
+class CanopyThermalProfileResult:
+    Ps: torch.Tensor
+    Po: torch.Tensor
+    Pso: torch.Tensor
+    Emint_: torch.Tensor
+    Eplut_: torch.Tensor
+    layer_thermal_upward: torch.Tensor
+
+
+@dataclass(slots=True)
+class CanopyDirectionalThermalResult:
+    tto: torch.Tensor
+    psi: torch.Tensor
+    Lot_: torch.Tensor
+    BrightnessT: torch.Tensor
+
+
 def default_thermal_wavelengths(*, device: torch.device, dtype: torch.dtype) -> torch.Tensor:
     reg2 = torch.arange(2500.0, 15001.0, 100.0, device=device, dtype=dtype)
     reg3 = torch.arange(16000.0, 50001.0, 1000.0, device=device, dtype=dtype)
@@ -188,6 +206,132 @@ class CanopyThermalRadianceModel:
             LotBB_=LotBB,
             Loutt=Loutt,
             Eoutt=Eoutt,
+        )
+
+    def profiles(
+        self,
+        lai: torch.Tensor,
+        tts: torch.Tensor,
+        tto: torch.Tensor,
+        psi: torch.Tensor,
+        Tcu: torch.Tensor,
+        Tch: torch.Tensor,
+        Tsu: torch.Tensor,
+        Tsh: torch.Tensor,
+        *,
+        thermal_optics: ThermalOptics | None = None,
+        hotspot: Optional[torch.Tensor] = None,
+        lidf: Optional[torch.Tensor] = None,
+        nlayers: Optional[int] = None,
+        wlT: Optional[torch.Tensor] = None,
+    ) -> CanopyThermalProfileResult:
+        result = self(
+            lai,
+            tts,
+            tto,
+            psi,
+            Tcu,
+            Tch,
+            Tsu,
+            Tsh,
+            thermal_optics=thermal_optics,
+            hotspot=hotspot,
+            lidf=lidf,
+            nlayers=nlayers,
+            wlT=wlT,
+        )
+        thermal = thermal_optics or ThermalOptics()
+        device = self.reflectance_model.fluspect.device
+        dtype = self.reflectance_model.fluspect.dtype
+        wlT = default_thermal_wavelengths(device=device, dtype=dtype) if wlT is None else torch.as_tensor(wlT, device=device, dtype=dtype)
+        lai_tensor = torch.as_tensor(lai, device=device, dtype=dtype)
+        if lai_tensor.ndim == 0:
+            lai_tensor = lai_tensor.unsqueeze(0)
+        batch = lai_tensor.shape[0]
+        hotspot_value = hotspot if hotspot is not None else torch.full_like(lai_tensor, self.reflectance_model.default_hotspot)
+        nl = self._resolve_nlayers(nlayers, Tcu=Tcu, Tch=Tch)
+        rho = self._broadcast_scalar_spectrum(thermal.rho_thermal, batch, wlT)
+        tau = self._broadcast_scalar_spectrum(thermal.tau_thermal, batch, wlT)
+        soil = self._broadcast_scalar_spectrum(thermal.rs_thermal, batch, wlT)
+        transfer = self.layered_transport.build(
+            rho,
+            tau,
+            soil,
+            lai_tensor,
+            tts,
+            tto,
+            psi,
+            hotspot=hotspot_value,
+            lidf=self.reflectance_model.lidf if lidf is None else lidf,
+            nlayers=nl,
+        )
+        return CanopyThermalProfileResult(
+            Ps=transfer.Ps,
+            Po=transfer.Po,
+            Pso=transfer.Pso,
+            Emint_=result.Emint_,
+            Eplut_=result.Eplut_,
+            layer_thermal_upward=0.001 * torch.trapz(result.Eplut_[:, :-1, :], wlT, dim=-1),
+        )
+
+    def directional(
+        self,
+        lai: torch.Tensor,
+        tts: torch.Tensor,
+        directional_tto: torch.Tensor,
+        directional_psi: torch.Tensor,
+        Tcu: torch.Tensor,
+        Tch: torch.Tensor,
+        Tsu: torch.Tensor,
+        Tsh: torch.Tensor,
+        *,
+        thermal_optics: ThermalOptics | None = None,
+        hotspot: Optional[torch.Tensor] = None,
+        lidf: Optional[torch.Tensor] = None,
+        nlayers: Optional[int] = None,
+        wlT: Optional[torch.Tensor] = None,
+    ) -> CanopyDirectionalThermalResult:
+        device = self.reflectance_model.fluspect.device
+        dtype = self.reflectance_model.fluspect.dtype
+        tto_angles = torch.as_tensor(directional_tto, device=device, dtype=dtype).reshape(-1)
+        psi_angles = torch.as_tensor(directional_psi, device=device, dtype=dtype).reshape(-1)
+        if tto_angles.shape != psi_angles.shape:
+            raise ValueError("directional_tto and directional_psi must have the same shape")
+
+        lai_tensor = torch.as_tensor(lai, device=device, dtype=dtype)
+        if lai_tensor.ndim == 0:
+            lai_tensor = lai_tensor.unsqueeze(0)
+        batch = lai_tensor.shape[0]
+        tts_tensor = self._expand_batch(tts, batch, device=device, dtype=dtype)
+        hotspot_value = hotspot if hotspot is not None else torch.full_like(lai_tensor, self.reflectance_model.default_hotspot)
+        sigma_sb = torch.as_tensor(5.67e-8, device=device, dtype=dtype)
+
+        lot = []
+        brightness = []
+        for idx in range(tto_angles.numel()):
+            result = self(
+                lai_tensor,
+                tts_tensor,
+                tto_angles[idx].expand(batch),
+                psi_angles[idx].expand(batch),
+                Tcu,
+                Tch,
+                Tsu,
+                Tsh,
+                thermal_optics=thermal_optics,
+                hotspot=hotspot_value,
+                lidf=lidf,
+                nlayers=nlayers,
+                wlT=wlT,
+            )
+            lot.append(result.Lot_)
+            brightness.append(torch.clamp(torch.pi * result.Loutt / sigma_sb, min=0.0) ** 0.25)
+
+        return CanopyDirectionalThermalResult(
+            tto=tto_angles,
+            psi=psi_angles,
+            Lot_=torch.stack(lot, dim=1),
+            BrightnessT=torch.stack(brightness, dim=1),
         )
 
     def integrated_balance(
