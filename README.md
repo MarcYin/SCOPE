@@ -38,10 +38,11 @@ scope_grid_netcdf_inmemory_refactored.m  # Legacy MATLAB grid runner reference
 
 ## Development Roadmap
 See [PLAN.md](PLAN.md) for the physics summary, staged translation plan, and GPU-oriented design notes. Short version:
-1. **Core physics stack** → leaf optics, 4SAIL reflectance, layered fluorescence, thermal RT, leaf biochemistry, and energy balance are now implemented.
+1. **Core physics stack** → leaf optics, 4SAIL reflectance, layered fluorescence, thermal RT, leaf biochemistry, and energy balance are now implemented, and the homogeneous canopy path now exposes explicit directional/profile APIs for reflectance, fluorescence, and thermal RT.
 2. **Current parity status** → the benchmark harness now scales to the full 100-case upstream Latin-hypercube suite, and there is now a separate 30-step upstream time-series parity sweep. Converged scene and time-series steps are locked for reflectance, fluorescence, thermal RT, and the coupled energy products, while non-converged upstream `ebal` cases such as scene `042` and time-series step `026` are tracked separately as stress diagnostics.
 3. **Workflow status** → the grid path is now chunk-local, metadata-preserving, backed by reusable input-preparation helpers, and able to write prepared or simulated `xarray` products through the shared NetCDF export layer.
 4. **Regression infrastructure** → GitHub Actions now runs the standard Python suite, committed benchmark summaries are versioned in pytest, standalone and coupled runner workflows now have batched-vs-single and dtype coverage, and the remaining hardening gap is broader lower-level kernel/device coverage plus the open MATLAB parity CI policy.
+5. **Deferred feature** → true `mSCOPE` support is still planned but intentionally deferred until a real workflow needs vertically heterogeneous leaf optics.
 
 ## Testing
 After installing the project and dev dependencies, run the unit tests with

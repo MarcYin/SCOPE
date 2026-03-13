@@ -9,8 +9,8 @@
 | Upstream asset loading | Real SCOPE optical assets, soil spectra, and SCOPE filename metadata can be loaded from the vendored upstream tree. | [src/scope_torch/spectral/loaders.py](src/scope_torch/spectral/loaders.py), [tests/spectral/test_loaders.py](tests/spectral/test_loaders.py) |
 | Leaf optics | `FluspectModel` ports the leaf optics core, including fluorescence matrices `Mb`/`Mf`, and now stays tensor-native instead of detaching to SciPy. | [src/scope_torch/spectral/fluspect.py](src/scope_torch/spectral/fluspect.py), [tests/spectral/test_fluspect.py](tests/spectral/test_fluspect.py) |
 | Canopy reflectance | `FourSAILModel` and `CanopyReflectanceModel` provide a SCOPE-facing reflectance stack with full reflectance outputs plus soil-library and BSM soil support. | [src/scope_torch/canopy/foursail.py](src/scope_torch/canopy/foursail.py), [src/scope_torch/canopy/reflectance.py](src/scope_torch/canopy/reflectance.py), [tests/canopy/test_foursail.py](tests/canopy/test_foursail.py), [tests/spectral/test_soil.py](tests/spectral/test_soil.py) |
-| Canopy fluorescence | The repo includes one-pass fluorescence, layered fluorescence transport, and a physiology-coupled layered fluorescence path. | [src/scope_torch/canopy/fluorescence.py](src/scope_torch/canopy/fluorescence.py), [tests/canopy/test_fluorescence.py](tests/canopy/test_fluorescence.py) |
-| Canopy thermal RT | The repo includes spectral thermal radiance and spectrally integrated thermal balance outputs with shared layered transport. | [src/scope_torch/canopy/thermal.py](src/scope_torch/canopy/thermal.py), [tests/canopy/test_thermal.py](tests/canopy/test_thermal.py) |
+| Canopy fluorescence | The repo includes one-pass fluorescence, layered fluorescence transport, a physiology-coupled layered fluorescence path, and explicit directional/profile APIs on the current homogeneous canopy stack. | [src/scope_torch/canopy/fluorescence.py](src/scope_torch/canopy/fluorescence.py), [tests/canopy/test_fluorescence.py](tests/canopy/test_fluorescence.py) |
+| Canopy thermal RT | The repo includes spectral thermal radiance, spectrally integrated thermal balance outputs with shared layered transport, and explicit directional/profile APIs on the current homogeneous canopy stack. | [src/scope_torch/canopy/thermal.py](src/scope_torch/canopy/thermal.py), [tests/canopy/test_thermal.py](tests/canopy/test_thermal.py) |
 | Leaf biochemistry | `LeafBiochemistryModel` covers C3/C4 assimilation, Ball-Berry closure, and fluorescence-yield outputs used by the canopy models. | [src/scope_torch/biochem/leaf.py](src/scope_torch/biochem/leaf.py), [tests/biochem/test_leaf.py](tests/biochem/test_leaf.py) |
 | Energy balance closure | `CanopyEnergyBalanceModel` iterates temperatures, boundary humidity/CO2, aerodynamic resistances, and coupled fluorescence/thermal outputs. | [src/scope_torch/energy/balance.py](src/scope_torch/energy/balance.py), [tests/energy/test_balance.py](tests/energy/test_balance.py) |
 | Grid execution | `ScopeGridDataModule` now batches chunk-locally, and `ScopeGridRunner` exposes reflectance, fluorescence, biochemical fluorescence, thermal RT, and coupled energy-balance workflows over ROI/time batches. | [src/scope_torch/data/grid.py](src/scope_torch/data/grid.py), [src/scope_torch/runners/grid.py](src/scope_torch/runners/grid.py), [tests/test_grid_data_module.py](tests/test_grid_data_module.py), [tests/test_scope_grid_runner.py](tests/test_scope_grid_runner.py) |
@@ -35,6 +35,8 @@
    The earlier CPU/detach hot spots are gone from the implemented kernels, there is now coupled energy/thermal batched-vs-single coverage, standalone and coupled runner batch-size/dtype coverage, and selected workflows have optional CPU-vs-GPU checks. Broader device and dtype coverage is still missing at the lower-level kernel layer.
 5. **Workflow exports are still narrower than the model core.**
    Input preparation, chunk-local batching, metadata-preserving `xarray` assembly, and NetCDF export are now implemented, but downstream format parity beyond NetCDF is not finished.
+6. **`mSCOPE` remains a future feature rather than an active implementation target.**
+   The current stack now exposes directional and vertical-profile outputs on the homogeneous canopy path, which covers the immediate workflow need. True `mSCOPE` still requires layer-resolved leaf optics and canopy transport plumbing and is intentionally deferred until there is a real consumer for it.
 
 ## 2. Revised Target Architecture
 
@@ -83,6 +85,7 @@ Completed:
 2. Exposed the full reflectance output set rather than only `rsot` and `rdd`.
 3. Added real soil loading and BSM soil generation paths.
 4. Locked reflectance outputs against the current MATLAB benchmark suite to negligible relative error.
+5. Added explicit directional and radiative-profile APIs on the current homogeneous reflectance stack.
 
 Remaining finish items:
 1. Keep the non-converged-scene classification explicit in the benchmark exports and summary reports.
@@ -97,9 +100,11 @@ Completed:
 3. Added spectral thermal radiance and integrated thermal balance outputs.
 4. Added coupled energy-balance fluorescence and thermal entry points.
 5. Locked fluorescence and thermal transport outputs against the current MATLAB benchmark suite.
+6. Added explicit directional and vertical-profile APIs for the current homogeneous fluorescence and thermal workflows.
 
 Remaining finish items:
 1. Add any extra exported RT diagnostics needed to isolate future widened-suite outliers faster.
+2. Decide whether directional/profile outputs should also be promoted through `ScopeGridRunner` and `xarray` assembly in the default workflow surface.
 
 ### Phase 3: Biochemistry and energy balance
 
@@ -158,14 +163,15 @@ Exit criteria:
 
 ## 4. Suggested Next Step
 
-The next step should be **finish lower-level kernel execution coverage and tighten benchmark-policy documentation**.
+The next step should be **finish lower-level kernel execution coverage and decide whether directional/profile outputs need runner-level workflow support**.
 
 Recommended sequence:
 
 1. Add any missing lower-level dtype/device smoke tests that would catch kernel-specific regressions before they show up in the runners.
-2. Promote the same-state versus phase-lagged energy-diagnostic distinction into the docs and benchmark summaries so future parity regressions are easier to interpret.
-3. Decide whether the new self-hosted MATLAB parity lane should remain manual or become a required protected-branch signal.
-4. Only then add any extra downstream-specific export targets if a real consumer still needs them beyond NetCDF.
+2. Decide whether the new directional/profile APIs should stay model-level or be wired into `ScopeGridRunner` and dataset export.
+3. Promote the same-state versus phase-lagged energy-diagnostic distinction into the docs and benchmark summaries so future parity regressions are easier to interpret.
+4. Decide whether the new self-hosted MATLAB parity lane should remain manual or become a required protected-branch signal.
+5. Keep `mSCOPE` as a deferred phase until there is a concrete workflow that requires vertically heterogeneous leaf optics.
 
 Why this should be next:
 
