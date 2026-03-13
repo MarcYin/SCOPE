@@ -5,7 +5,13 @@ from pathlib import Path
 
 import xarray as xr
 
-from scope_torch.io import ScopeInputFiles, prepare_scope_input_dataset, read_s2_bio_inputs
+from scope_torch.io import (
+    NetCDFWriteOptions,
+    ScopeInputFiles,
+    prepare_scope_input_dataset,
+    read_s2_bio_inputs,
+    write_netcdf_dataset,
+)
 
 
 def parse_args() -> argparse.Namespace:
@@ -23,6 +29,9 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--bounds", nargs=4, type=float, metavar=("MINX", "MINY", "MAXX", "MAXY"), help="Optional spatial subset bounds.")
     parser.add_argument("--time-start", help="Optional inclusive time subset start.")
     parser.add_argument("--time-end", help="Optional inclusive time subset end.")
+    parser.add_argument("--netcdf-engine", choices=("netcdf4", "h5netcdf", "scipy"), help="Optional NetCDF backend override.")
+    parser.add_argument("--compression-level", type=int, default=4, help="Compression level for HDF5-backed NetCDF engines.")
+    parser.add_argument("--no-compression", action="store_true", help="Disable NetCDF variable compression even when the selected backend supports it.")
     return parser.parse_args()
 
 
@@ -47,9 +56,15 @@ def main() -> None:
         bounds=args.bounds,
         time_slice=time_slice,
     )
-    output_path = Path(args.output)
-    output_path.parent.mkdir(parents=True, exist_ok=True)
-    dataset.to_netcdf(output_path)
+    write_netcdf_dataset(
+        dataset,
+        Path(args.output),
+        options=NetCDFWriteOptions(
+            engine=args.netcdf_engine,
+            compression=not args.no_compression,
+            compression_level=args.compression_level,
+        ),
+    )
 
 
 if __name__ == "__main__":

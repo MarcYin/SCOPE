@@ -40,7 +40,18 @@ from .energy import (
     saturated_vapor_pressure,
     slope_saturated_vapor_pressure,
 )
-from .io import DEFAULT_SCOPE_OPTIONS, ScopeInputFiles, derive_observation_time_grid, prepare_scope_input_dataset, read_s2_bio_inputs
+from .io import (
+    DEFAULT_SCOPE_OPTIONS,
+    NetCDFWriteOptions,
+    ScopeInputFiles,
+    available_netcdf_engines,
+    build_netcdf_encoding,
+    derive_observation_time_grid,
+    prepare_scope_input_dataset,
+    read_s2_bio_inputs,
+    resolve_netcdf_engine,
+    write_netcdf_dataset,
+)
 from .spectral.fluspect import FluspectModel, LeafBioBatch, LeafOptics, OptiPar, SpectralGrids
 from .spectral.loaders import FluspectResources, SoilSpectraLibrary, load_fluspect_resources, load_scope_filenames, load_soil_spectra
 from .spectral.soil import BSMSoilParameters, SoilBSMModel, SoilEmpiricalParams
@@ -88,6 +99,7 @@ __all__ = [
     "EnergyBalanceOptions",
     "EnergyBalanceSoil",
     "DEFAULT_SCOPE_OPTIONS",
+    "NetCDFWriteOptions",
     "ThermalOptics",
     "HeatFluxInputs",
     "HeatFluxResult",
@@ -99,13 +111,17 @@ __all__ = [
     "slope_saturated_vapor_pressure",
     "campbell_lidf",
     "default_thermal_wavelengths",
+    "available_netcdf_engines",
+    "build_netcdf_encoding",
     "derive_observation_time_grid",
     "prepare_scope_input_dataset",
     "read_s2_bio_inputs",
+    "resolve_netcdf_engine",
     "ScopeInputFiles",
     "scope_lazitab",
     "scope_lidf",
     "scope_litab",
+    "write_netcdf_dataset",
 ]
 
 try:  # pragma: no cover
