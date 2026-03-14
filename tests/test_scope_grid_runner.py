@@ -445,7 +445,6 @@ def test_scope_grid_runner_run_dataset_preserves_xarray_metadata():
     assert dataset_outputs["rso"].dims == ("y", "x", "time", "wavelength")
     assert dataset_outputs.attrs["site"] == "demo"
     assert dataset_outputs.attrs["scope_product"] == "reflectance"
-    assert dataset_outputs.attrs["scope_torch_product"] == "reflectance"
     assert np.allclose(dataset_outputs["wavelength"].values, spectral.wlP.cpu().numpy())
     expected_rso = flat_outputs["rso"].cpu().numpy().reshape(1, 1, 2, nwl)
     assert np.allclose(dataset_outputs["rso"].values, expected_rso)
@@ -1589,9 +1588,7 @@ def test_scope_grid_runner_run_scope_dataset_honours_reflectance_option_attrs():
     profile_outputs = runner.run_reflectance_profiles_dataset(module, varmap=varmap, nlayers=3)
 
     assert scope_outputs.attrs["scope_product"] == "scope_workflow"
-    assert scope_outputs.attrs["scope_torch_product"] == "scope_workflow"
     assert scope_outputs.attrs["scope_components"] == "reflectance,reflectance_directional,reflectance_profile"
-    assert scope_outputs.attrs["scope_torch_components"] == "reflectance,reflectance_directional,reflectance_profile"
     assert np.allclose(scope_outputs["rsot"].values, reflectance_outputs["rsot"].values)
     assert np.allclose(scope_outputs["reflectance_directional_refl_"].values, directional_outputs["refl_"].values)
     assert np.allclose(scope_outputs["reflectance_profile_Ps"].values, profile_outputs["Ps"].values)

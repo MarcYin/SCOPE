@@ -1338,7 +1338,6 @@ class ScopeGridRunner:
             variable_coords=variable_coords,
             attrs={
                 "scope_product": product,
-                "scope_torch_product": product,
             },
         )
 
@@ -1363,9 +1362,7 @@ class ScopeGridRunner:
         if scope_options:
             attrs.update(scope_options)
         attrs["scope_product"] = product
-        attrs["scope_torch_product"] = product
         attrs["scope_components"] = ",".join(components)
-        attrs["scope_torch_components"] = ",".join(components)
         merged.attrs = attrs
         return merged
 
@@ -1395,7 +1392,6 @@ class ScopeGridRunner:
             variable_coords=variable_coords,
             attrs={
                 "scope_product": product,
-                "scope_torch_product": product,
             },
         )
         dataset = dataset.assign_coords(
@@ -1423,7 +1419,6 @@ class ScopeGridRunner:
             variable_coords=variable_coords,
             attrs={
                 "scope_product": product,
-                "scope_torch_product": product,
             },
         )
 

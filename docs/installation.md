@@ -16,6 +16,18 @@ Optional:
 
 ## Recommended Source Installation
 
+If you are installing from PyPI once a release has been published:
+
+```bash
+python -m pip install SCOPE-RTM
+```
+
+The public Python import remains:
+
+```python
+import scope
+```
+
 Clone the repo and fetch the pinned upstream SCOPE checkout:
 
 ```bash

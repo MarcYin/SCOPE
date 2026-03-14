@@ -43,7 +43,7 @@ The documentation surface is also treated as a build artifact:
 For maintainers, the repository now has separate operational paths for packaging and docs deployment:
 
 - `.github/workflows/release.yml`
-  Builds source and wheel distributions, runs `twine check`, and supports publishing to TestPyPI or PyPI through GitHub environments.
+  Builds source and wheel distributions for `SCOPE-RTM`, runs `twine check`, auto-publishes to PyPI on version tags, and still supports manual TestPyPI or PyPI publishing through GitHub environments.
 - `.github/workflows/docs.yml`
   Builds the MkDocs site and deploys it to GitHub Pages.
 

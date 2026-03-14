@@ -22,6 +22,18 @@ The current implementation supports:
 
 ## Install
 
+Published package name:
+
+```bash
+python -m pip install SCOPE-RTM
+```
+
+Import name:
+
+```python
+import scope
+```
+
 ### 1. Clone the repository
 
 ```bash
@@ -164,6 +176,6 @@ The strongest automated checks currently include:
 ## Release Workflows
 
 - `.github/workflows/release.yml`
-  Builds `sdist` and wheel artifacts, validates them with `twine check`, and supports publishing to TestPyPI or PyPI through GitHub Actions environments.
+  Builds `sdist` and wheel artifacts for `SCOPE-RTM`, validates them with `twine check`, and auto-publishes to PyPI on version tags. Manual dispatch still supports TestPyPI or PyPI.
 - `.github/workflows/docs.yml`
   Builds the MkDocs site and deploys it to GitHub Pages.
