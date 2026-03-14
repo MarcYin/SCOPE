@@ -9,5 +9,6 @@ upstream/
 .DS_Store
 build/
 dist/
+dist-releasecheck*/
 site/
 *.egg-info/
