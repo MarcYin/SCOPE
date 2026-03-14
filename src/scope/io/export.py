@@ -111,7 +111,9 @@ def write_netcdf_dataset(
     }
     if resolved.format is not None:
         kwargs["format"] = resolved.format
-    unlimited_dims = tuple(dim for dim in resolved.unlimited_dims if dim in sanitized.dims)
+    unlimited_dims = ()
+    if engine in _HDF5_ENGINES:
+        unlimited_dims = tuple(dim for dim in resolved.unlimited_dims if dim in sanitized.dims)
     if unlimited_dims:
         kwargs["unlimited_dims"] = unlimited_dims
     sanitized.to_netcdf(**kwargs)

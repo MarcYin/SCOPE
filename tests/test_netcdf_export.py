@@ -65,3 +65,30 @@ def test_write_netcdf_dataset_roundtrips_and_sanitises_attrs(tmp_path: Path):
         assert roundtrip.attrs["enabled"] == 1
         assert "unused" not in roundtrip.attrs
         assert roundtrip["foo"].attrs["meta"] == '{"source": "unit-test"}'
+
+
+def test_write_netcdf_dataset_scipy_omits_unlimited_dims_for_runner_style_layout(tmp_path: Path):
+    dataset = xr.Dataset(
+        {
+            "rsot": (
+                ("y", "x", "time", "wavelength"),
+                np.ones((1, 1, 1, 4), dtype=np.float64),
+            )
+        },
+        coords={
+            "y": np.array([0.0]),
+            "x": np.array([0.0]),
+            "time": pd.date_range("2020-01-01", periods=1, freq="D"),
+            "wavelength": np.array([500.0, 650.0, 865.0, 1600.0]),
+        },
+    )
+
+    output_path = write_netcdf_dataset(
+        dataset,
+        tmp_path / "runner_style_scipy.nc",
+        options=NetCDFWriteOptions(engine="scipy"),
+    )
+
+    with xr.open_dataset(output_path, engine="scipy") as roundtrip:
+        assert np.allclose(roundtrip["rsot"].values, dataset["rsot"].values)
+        assert tuple(roundtrip["rsot"].dims) == ("y", "x", "time", "wavelength")
