@@ -3,7 +3,7 @@ from __future__ import annotations
 import argparse
 from typing import Sequence
 
-from . import fetch_upstream, prepare_scope_input, run
+from . import fetch_upstream, prepare_scope_input, run, variables
 
 
 def _run_fetch_upstream(args: argparse.Namespace) -> None:
@@ -18,10 +18,15 @@ def _run_scope_dataset(args: argparse.Namespace) -> None:
     print(run.run(args).resolve())
 
 
+def _run_variables(args: argparse.Namespace) -> None:
+    variables.run(args)
+
+
 def build_parser() -> argparse.ArgumentParser:
     fetch_parent = fetch_upstream.build_parser()
     prepare_parent = prepare_scope_input.build_parser()
     run_parent = run.build_parser()
+    variables_parent = variables.build_parser()
     parser = argparse.ArgumentParser(
         prog="scope",
         description="Top-level command-line interface for SCOPE-RTM.",
@@ -56,6 +61,14 @@ def build_parser() -> argparse.ArgumentParser:
         add_help=False,
     )
     run_parser.set_defaults(func=_run_scope_dataset)
+    variables_parser = subparsers.add_parser(
+        "vars",
+        help="Search the variable glossary.",
+        description=variables_parent.description,
+        parents=[variables_parent],
+        add_help=False,
+    )
+    variables_parser.set_defaults(func=_run_variables)
     return parser
 
 

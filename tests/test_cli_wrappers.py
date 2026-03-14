@@ -10,6 +10,8 @@ import pandas as pd
 import pytest
 import xarray as xr
 
+from scope.variables import render_variable_markdown
+
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 SCOPE_ROOT = REPO_ROOT / "upstream" / "SCOPE"
@@ -49,6 +51,22 @@ def test_prepare_scope_input_wrapper_bootstraps_src_path():
     assert "Build a runner-ready SCOPE input dataset" in completed.stdout
 
 
+def test_render_variable_glossary_wrapper_bootstraps_src_path():
+    script = REPO_ROOT / "scripts" / "render_variable_glossary.py"
+    completed = subprocess.run(
+        [sys.executable, str(script)],
+        cwd=REPO_ROOT,
+        env=_clean_env(),
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+
+    glossary_path = REPO_ROOT / "docs" / "variable-glossary.md"
+    assert str(glossary_path) in completed.stdout
+    assert glossary_path.read_text(encoding="utf-8") == render_variable_markdown()
+
+
 def test_scope_module_cli_help():
     completed = subprocess.run(
         [sys.executable, "-m", "scope", "--help"],
@@ -63,6 +81,7 @@ def test_scope_module_cli_help():
     assert "fetch-upstream" in completed.stdout
     assert "prepare" in completed.stdout
     assert "run" in completed.stdout
+    assert "vars" in completed.stdout
 
 
 def test_scope_module_cli_subcommand_help():
@@ -90,6 +109,20 @@ def test_scope_run_entry_point_help():
     )
 
     assert "Run a prepared SCOPE input dataset" in completed.stdout
+
+
+def test_scope_module_variable_search_cli():
+    completed = subprocess.run(
+        [sys.executable, "-m", "scope", "vars", "Rntot"],
+        cwd=REPO_ROOT,
+        env=_clean_env(),
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+
+    assert "Rntot" in completed.stdout
+    assert "Total net radiation" in completed.stdout
 
 
 def test_scope_module_run_cli_executes_minimal_reflectance_workflow(tmp_path: Path):

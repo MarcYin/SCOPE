@@ -70,6 +70,7 @@ from .runners import ScopeGridRunner
 from .spectral.fluspect import FluspectModel, LeafBioBatch, LeafOptics, OptiPar, SpectralGrids
 from .spectral.loaders import FluspectResources, SoilSpectraLibrary, load_fluspect_resources, load_scope_filenames, load_soil_spectra
 from .spectral.soil import BSMSoilParameters, SoilBSMModel, SoilEmpiricalParams
+from .variables import VariableDefinition, iter_variables, render_variable_markdown, search_variables
 
 __all__ = [
     "SimulationConfig",
@@ -91,9 +92,13 @@ __all__ = [
     "BSMSoilParameters",
     "SoilBSMModel",
     "SoilEmpiricalParams",
+    "VariableDefinition",
     "load_fluspect_resources",
     "load_scope_filenames",
     "load_soil_spectra",
+    "iter_variables",
+    "render_variable_markdown",
+    "search_variables",
     "FourSAILModel",
     "FourSAILResult",
     "CanopyFluorescenceModel",
