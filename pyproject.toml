@@ -19,12 +19,21 @@ dependencies = [
     "pandas>=2.2"
 ]
 
+[project.scripts]
+scope-torch-fetch-upstream = "scope_torch.cli.fetch_upstream:main"
+scope-torch-prepare = "scope_torch.cli.prepare_scope_input:main"
+
 [project.optional-dependencies]
 dev = [
     "pytest>=8.1",
     "pytest-cov>=4.1",
     "prosail>=2.0",
     "rich>=13.7"
+]
+docs = [
+    "mkdocs>=1.6",
+    "mkdocs-material>=9.5",
+    "mkdocs-mermaid2-plugin>=1.2"
 ]
 
 [tool.setuptools]
