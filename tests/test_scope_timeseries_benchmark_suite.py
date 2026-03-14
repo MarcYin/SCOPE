@@ -117,3 +117,17 @@ def test_default_matlab_honours_environment_override(monkeypatch):
     module = _load_suite_module()
 
     assert module.DEFAULT_MATLAB == "/custom/matlab"
+
+
+def test_scene_suite_policy_helper_is_reused_for_timeseries_policy():
+    module = _load_suite_module()
+
+    policy = module._SCENE_SUITE._parity_policy_metadata(
+        nonconverged_key="nonconverged_energy_step_rule",
+        nonconverged_rule="keep non-converged steps as stress diagnostics",
+    )
+
+    assert policy["primary_relative_summary"] == "parity_worst_cases"
+    assert policy["absolute_policy_summary"] == "absolute_policy_worst_cases"
+    assert policy["stress_summary"] == "stress_worst_cases"
+    assert policy["nonconverged_energy_step_rule"] == "keep non-converged steps as stress diagnostics"

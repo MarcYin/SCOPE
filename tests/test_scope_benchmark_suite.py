@@ -137,3 +137,24 @@ def test_default_matlab_honours_environment_override(monkeypatch):
     module = _load_suite_module()
 
     assert module.DEFAULT_MATLAB == "/custom/matlab"
+
+
+def test_parity_policy_metadata_exposes_interpretation_order():
+    module = _load_suite_module()
+
+    policy = module._parity_policy_metadata(
+        nonconverged_key="nonconverged_energy_case_rule",
+        nonconverged_rule="keep stress cases separate",
+    )
+
+    assert policy["primary_relative_summary"] == "parity_worst_cases"
+    assert policy["absolute_policy_summary"] == "absolute_policy_worst_cases"
+    assert policy["stress_summary"] == "stress_worst_cases"
+    assert policy["recommended_interpretation_order"] == [
+        "parity_worst_cases",
+        "absolute_policy_worst_cases",
+        "stress_worst_cases",
+    ]
+    assert "energy_balance.sunlit_A" in policy["phase_lagged_metrics"]
+    assert policy["phase_lagged_metric_replacements"]["energy_balance.sunlit_A"] == "leaf_iteration.sunlit_A"
+    assert policy["nonconverged_energy_case_rule"] == "keep stress cases separate"

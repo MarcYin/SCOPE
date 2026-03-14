@@ -84,11 +84,30 @@ def test_scene_benchmark_summary_matches_committed_policy():
     assert summary["cases"][0] == 1
     assert summary["cases"][-1] == 100
     assert summary["nonconverged_energy_cases"] == ["042"]
+    assert summary["parity_policy"]["primary_relative_summary"] == "parity_worst_cases"
+    assert summary["parity_policy"]["absolute_policy_summary"] == "absolute_policy_worst_cases"
+    assert summary["parity_policy"]["stress_summary"] == "stress_worst_cases"
+    assert summary["parity_policy"]["recommended_interpretation_order"] == [
+        "parity_worst_cases",
+        "absolute_policy_worst_cases",
+        "stress_worst_cases",
+    ]
+    assert "leaf_iteration.*" in summary["parity_policy"]["same_state_rule"]
     assert summary["parity_policy"]["always_excluded_metrics"] == [
         "energy_balance.Rnhc",
         "energy_balance.Rnhct",
         "energy_balance.Rnuc",
         "energy_balance.Rnuct",
+        "energy_balance.shaded_A",
+        "energy_balance.shaded_Ci",
+        "energy_balance.shaded_eta",
+        "energy_balance.shaded_rcw",
+        "energy_balance.sunlit_A",
+        "energy_balance.sunlit_Ci",
+        "energy_balance.sunlit_eta",
+        "energy_balance.sunlit_rcw",
+    ]
+    assert summary["parity_policy"]["phase_lagged_metrics"] == [
         "energy_balance.shaded_A",
         "energy_balance.shaded_Ci",
         "energy_balance.shaded_eta",
@@ -126,11 +145,30 @@ def test_timeseries_benchmark_summary_matches_committed_policy():
     assert summary["steps"][0] == "001"
     assert summary["steps"][-1] == "030"
     assert summary["nonconverged_energy_steps"] == ["026"]
+    assert summary["parity_policy"]["primary_relative_summary"] == "parity_worst_cases"
+    assert summary["parity_policy"]["absolute_policy_summary"] == "absolute_policy_worst_cases"
+    assert summary["parity_policy"]["stress_summary"] == "stress_worst_cases"
+    assert summary["parity_policy"]["recommended_interpretation_order"] == [
+        "parity_worst_cases",
+        "absolute_policy_worst_cases",
+        "stress_worst_cases",
+    ]
+    assert "leaf_iteration.*" in summary["parity_policy"]["same_state_rule"]
     assert summary["parity_policy"]["always_excluded_metrics"] == [
         "energy_balance.Rnhc",
         "energy_balance.Rnhct",
         "energy_balance.Rnuc",
         "energy_balance.Rnuct",
+        "energy_balance.shaded_A",
+        "energy_balance.shaded_Ci",
+        "energy_balance.shaded_eta",
+        "energy_balance.shaded_rcw",
+        "energy_balance.sunlit_A",
+        "energy_balance.sunlit_Ci",
+        "energy_balance.sunlit_eta",
+        "energy_balance.sunlit_rcw",
+    ]
+    assert summary["parity_policy"]["phase_lagged_metrics"] == [
         "energy_balance.shaded_A",
         "energy_balance.shaded_Ci",
         "energy_balance.shaded_eta",

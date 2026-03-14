@@ -812,6 +812,25 @@
     "042"
   ],
   "parity_policy": {
+    "primary_relative_summary": "parity_worst_cases",
+    "absolute_policy_summary": "absolute_policy_worst_cases",
+    "stress_summary": "stress_worst_cases",
+    "recommended_interpretation_order": [
+      "parity_worst_cases",
+      "absolute_policy_worst_cases",
+      "stress_worst_cases"
+    ],
+    "same_state_rule": "Use parity_worst_cases for same-state relative parity. For leaf biochemistry quantities, prefer leaf_iteration.* entries over phase-lagged energy_balance.sunlit_* and energy_balance.shaded_* diagnostics.",
+    "phase_lagged_metrics": [
+      "energy_balance.shaded_A",
+      "energy_balance.shaded_Ci",
+      "energy_balance.shaded_eta",
+      "energy_balance.shaded_rcw",
+      "energy_balance.sunlit_A",
+      "energy_balance.sunlit_Ci",
+      "energy_balance.sunlit_eta",
+      "energy_balance.sunlit_rcw"
+    ],
     "always_excluded_metrics": [
       "energy_balance.Rnhc",
       "energy_balance.Rnhct",
@@ -836,6 +855,7 @@
       "energy_balance.sunlit_rcw": "leaf_iteration.sunlit_rcw",
       "energy_balance.shaded_rcw": "leaf_iteration.shaded_rcw"
     },
+    "phase_lagged_rule": "Exclude phase-lagged iterate diagnostics from relative parity gating and replace them with the same-state leaf_iteration.* metrics.",
     "absolute_policy_metrics": [
       "energy_balance.Rnhc",
       "energy_balance.Rnhct",

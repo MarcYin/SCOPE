@@ -42,6 +42,42 @@ PHASE_LAGGED_METRIC_REPLACEMENTS = {
 }
 
 
+def _parity_policy_metadata(
+    *,
+    nonconverged_rule: str,
+    nonconverged_key: str,
+) -> dict[str, Any]:
+    return {
+        "primary_relative_summary": "parity_worst_cases",
+        "absolute_policy_summary": "absolute_policy_worst_cases",
+        "stress_summary": "stress_worst_cases",
+        "recommended_interpretation_order": [
+            "parity_worst_cases",
+            "absolute_policy_worst_cases",
+            "stress_worst_cases",
+        ],
+        "same_state_rule": (
+            "Use parity_worst_cases for same-state relative parity. "
+            "For leaf biochemistry quantities, prefer leaf_iteration.* entries over "
+            "phase-lagged energy_balance.sunlit_* and energy_balance.shaded_* diagnostics."
+        ),
+        "phase_lagged_metrics": sorted(PHASE_LAGGED_ENERGY_METRICS),
+        "always_excluded_metrics": sorted(RELATIVE_PARITY_EXCLUDE),
+        "phase_lagged_metric_replacements": PHASE_LAGGED_METRIC_REPLACEMENTS,
+        "phase_lagged_rule": (
+            "Exclude phase-lagged iterate diagnostics from relative parity gating and "
+            "replace them with the same-state leaf_iteration.* metrics."
+        ),
+        "absolute_policy_metrics": sorted(LOW_MAGNITUDE_ABSOLUTE_POLICY_METRICS),
+        "absolute_policy_rule": (
+            "Use max_abs rather than max_rel for low-magnitude canopy thermal component "
+            "terms whose absolute errors stay negligible while relative errors are unstable."
+        ),
+        "nonconverged_energy_metric_prefixes": list(NONCONVERGED_ENERGY_PREFIXES),
+        nonconverged_key: nonconverged_rule,
+    }
+
+
 def _discover_default_cases(repo_root: Path) -> list[int]:
     latin_hypercube = repo_root / "upstream" / "SCOPE" / "input" / "input_data_latin_hypercube.csv"
     with latin_hypercube.open(newline="", encoding="utf-8") as handle:
@@ -354,14 +390,13 @@ def main() -> int:
         "reports_dir": _stable_summary_path(reports_dir, repo_root),
         "case_status": case_status,
         "nonconverged_energy_cases": sorted(nonconverged_energy_cases),
-        "parity_policy": {
-            "always_excluded_metrics": sorted(parity_exclude),
-            "phase_lagged_metric_replacements": PHASE_LAGGED_METRIC_REPLACEMENTS,
-            "absolute_policy_metrics": sorted(LOW_MAGNITUDE_ABSOLUTE_POLICY_METRICS),
-            "absolute_policy_rule": "Use max_abs rather than max_rel for low-magnitude canopy thermal component terms whose absolute errors stay negligible while relative errors are unstable.",
-            "nonconverged_energy_metric_prefixes": list(NONCONVERGED_ENERGY_PREFIXES),
-            "nonconverged_energy_case_rule": "Exclude energy-balance and energy-iteration parity metrics for upstream scenes that hit ebal max iterations; retain them as stress diagnostics.",
-        },
+        "parity_policy": _parity_policy_metadata(
+            nonconverged_key="nonconverged_energy_case_rule",
+            nonconverged_rule=(
+                "Exclude energy-balance and energy-iteration parity metrics for upstream "
+                "scenes that hit ebal max iterations; retain them as stress diagnostics."
+            ),
+        ),
         "per_case": per_case,
         "worst_cases": worst,
         "parity_exclude": sorted(parity_exclude),

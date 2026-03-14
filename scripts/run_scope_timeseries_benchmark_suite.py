@@ -230,14 +230,13 @@ def main() -> int:
         "reports_dir": _SCENE_SUITE._stable_summary_path(reports_dir, repo_root),
         "step_status": step_status,
         "nonconverged_energy_steps": sorted(nonconverged_energy_steps),
-        "parity_policy": {
-            "always_excluded_metrics": sorted(parity_exclude),
-            "phase_lagged_metric_replacements": _SCENE_SUITE.PHASE_LAGGED_METRIC_REPLACEMENTS,
-            "absolute_policy_metrics": sorted(_SCENE_SUITE.LOW_MAGNITUDE_ABSOLUTE_POLICY_METRICS),
-            "absolute_policy_rule": "Use max_abs rather than max_rel for low-magnitude canopy thermal component terms whose absolute errors stay negligible while relative errors are unstable.",
-            "nonconverged_energy_metric_prefixes": list(NONCONVERGED_ENERGY_PREFIXES),
-            "nonconverged_energy_step_rule": "Exclude energy-balance and energy-iteration parity metrics for upstream time-series steps that hit ebal max iterations; retain them as stress diagnostics.",
-        },
+        "parity_policy": _SCENE_SUITE._parity_policy_metadata(
+            nonconverged_key="nonconverged_energy_step_rule",
+            nonconverged_rule=(
+                "Exclude energy-balance and energy-iteration parity metrics for upstream "
+                "time-series steps that hit ebal max iterations; retain them as stress diagnostics."
+            ),
+        ),
         "worst_cases": worst,
         "parity_worst_cases": parity_worst,
         "absolute_policy_worst_cases": absolute_policy_worst,
