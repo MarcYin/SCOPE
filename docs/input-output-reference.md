@@ -2,6 +2,13 @@
 
 This page summarizes the practical input and output contracts for the current runner surface.
 
+For name-by-name physical meanings, units, aliases, and search, use [Variable Glossary](variable-glossary.md) or the terminal command:
+
+```bash
+scope vars Rntot
+scope vars --all --kind output
+```
+
 ## Preferred Entry Point
 
 For most application code, prefer:

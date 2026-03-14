@@ -54,6 +54,7 @@ scope --help
 scope fetch-upstream --help
 scope prepare --help
 scope run --help
+scope vars Cab
 ```
 
 ### 1. Clone the repository
@@ -178,6 +179,7 @@ For direct lower-level use:
 - [Quickstart](docs/quickstart.md)
 - [Model Mechanics](docs/model-mechanics.md)
 - [Input / Output Reference](docs/input-output-reference.md)
+- [Variable Glossary](docs/variable-glossary.md)
 - [Examples](docs/examples.md)
 - [Production Notes](docs/production-notes.md)
 - [Releasing](docs/releasing.md)

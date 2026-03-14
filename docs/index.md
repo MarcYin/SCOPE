@@ -31,6 +31,7 @@ If this is your first time using the project:
 1. Read [Installation](installation.md)
 2. Run the examples in [Quickstart](quickstart.md)
 3. Use [Input / Output Reference](input-output-reference.md) when building real workflows
+4. Use [Variable Glossary](variable-glossary.md) when you need the physical meaning of a specific name
 
 ## Main User Entry Points
 
@@ -61,5 +62,6 @@ The current implementation supports:
 
 - [Quickstart](quickstart.md)
 - [Model Mechanics](model-mechanics.md)
+- [Variable Glossary](variable-glossary.md)
 - [Examples](examples.md)
 - [Production Notes](production-notes.md)

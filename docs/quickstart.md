@@ -95,6 +95,14 @@ scope-prepare --help
 python prepare_scope_input.py --help
 ```
 
+If you need the meaning of a variable name while building inputs, use:
+
+```bash
+scope vars Cab
+scope vars Rntot
+scope vars --all --kind output
+```
+
 ## 5. Run the Prepared Dataset
 
 Once you have a prepared input dataset, run the installed workflow CLI:

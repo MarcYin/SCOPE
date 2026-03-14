@@ -25,6 +25,7 @@ nav:
   - Quickstart: quickstart.md
   - Model Mechanics: model-mechanics.md
   - Input / Output Reference: input-output-reference.md
+  - Variable Glossary: variable-glossary.md
   - Examples: examples.md
   - Production Notes: production-notes.md
   - Releasing: releasing.md

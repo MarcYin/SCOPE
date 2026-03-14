@@ -85,6 +85,7 @@ jobs:
           scope-fetch-upstream --help
           scope-prepare --help
           scope-run --help
+          scope vars Cab
 
   publish-testpypi:
     name: Publish to TestPyPI
