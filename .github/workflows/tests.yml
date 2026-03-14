@@ -22,6 +22,7 @@ concurrency:
 
 jobs:
   unit-cpu:
+    name: Python suite (required CPU)
     runs-on: ubuntu-latest
     strategy:
       fail-fast: false
@@ -46,6 +47,7 @@ jobs:
         run: PYTHONPATH=src python -m pytest -q
 
   unit-gpu:
+    name: GPU suite (opt-in self-hosted)
     if: ${{ github.event_name == 'workflow_dispatch' && inputs.run_gpu }}
     runs-on: [self-hosted, linux, x64, gpu]
     timeout-minutes: 60
@@ -75,6 +77,7 @@ jobs:
         run: python -m pytest -q
 
   parity-matlab:
+    name: MATLAB parity (opt-in self-hosted)
     if: ${{ github.event_name == 'workflow_dispatch' && inputs.run_matlab }}
     runs-on: [self-hosted, matlab]
     timeout-minutes: 120

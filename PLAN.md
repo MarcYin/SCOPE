@@ -19,9 +19,9 @@
 
 ### Still incomplete or narrow
 
-1. The default CI path covers the Python test suite and committed benchmark summaries, but it does not run MATLAB parity gates automatically.
+1. The default CI path covers the Python test suite and committed benchmark summaries, but it does not run MATLAB parity gates automatically because those require self-hosted licensed infrastructure.
 2. Device coverage is substantially improved but still not exhaustive: standalone and coupled runner workflows now have batched-vs-single and dtype coverage, the lower-level kernel layer now has direct batch/dtype regression tests with optional CUDA mirrors, but mixed-dtype and broader backend coverage are still missing.
-3. Workflow parity is still narrow around downstream option coverage and any export targets beyond the current shared NetCDF writer.
+3. Workflow parity now includes high-level option-driven directional/profile dispatch through the shared runner surface, but it is still narrow around downstream export targets beyond the current shared NetCDF writer and any pipeline-specific workflow wrappers.
 
 ### Main accuracy and scope gaps
 
@@ -29,8 +29,8 @@
    The MATLAB harness now scales to the full 100-case upstream Latin-hypercube set via `scripts/run_scope_benchmark_suite.py`, with per-case reports in `tests/data/benchmark_suite_reports/` and an aggregate summary in `tests/data/scope_benchmark_suite_summary.json`. The earlier `reflectance.refl` outlier was a benchmark-harness reconstruction bug and is now closed across the full 100-case sweep. The suite now treats upstream scenes that hit `ebal` max iterations as stress diagnostics instead of parity-gating cases. At the moment only case `042` falls into that bucket.
 2. **Time-series parity is now covered separately from the scene suite.**
    `scripts/export_scope_timeseries_benchmarks.m` and `scripts/run_scope_timeseries_benchmark_suite.py` now exercise upstream SCOPE `simulation == 1` on the default 30-step verification series, writing per-step reports under `tests/data/timeseries_benchmark_reports/` and an aggregate summary in `tests/data/scope_timeseries_benchmark_summary.json`. The same non-converged-upstream policy applies there: step `026` is currently classified as a stress case because upstream MATLAB `ebal` hits `maxit`.
-3. **The raw energy-balance iterate diagnostics are still easy to misread.**
-   End-of-iteration same-state parity is now negligible, but the phase-lagged `energy_balance.sunlit_A` and `energy_balance.shaded_A` fields in the raw comparison reports still look worse than the true leaf-kernel parity because they compare the final leaf solve against post-update boundary states. The real parity contract is the committed suite summaries plus the exported `leaf_iteration.*` and same-state energy metrics. That distinction is now reflected in the suite policy, but it still needs broader user-facing documentation.
+3. **The raw energy-balance iterate diagnostics are still easy to misread unless the policy is explicit.**
+   End-of-iteration same-state parity is now negligible, but the phase-lagged `energy_balance.sunlit_A` and `energy_balance.shaded_A` fields in the raw comparison reports still look worse than the true leaf-kernel parity because they compare the final leaf solve against post-update boundary states. The real parity contract is the committed suite summaries plus the exported `leaf_iteration.*` and same-state energy metrics. That distinction is now reflected in the suite JSON `parity_policy` block and documented in [docs/benchmark-policy.md](docs/benchmark-policy.md).
 4. **GPU and batched consistency are now covered at both runner and kernel layers.**
    The earlier CPU/detach hot spots are gone from the implemented kernels, there is now coupled energy/thermal batched-vs-single coverage, standalone and coupled runner batch-size/dtype coverage, direct lower-level kernel batch/dtype coverage, and selected workflows have optional CPU-vs-GPU checks. The remaining execution-mode gap is mixed-dtype or broader backend coverage rather than missing basic kernel/device regression tests.
 5. **Workflow exports are still narrower than the model core.**
@@ -119,8 +119,8 @@ Completed:
 6. Locked current same-state energy-balance parity across the committed scene and time-series benchmark policies, with explicit tolerances versioned in the test suite.
 
 Remaining finish items:
-1. Document the distinction between same-state parity and phase-lagged iterate diagnostics in the benchmark reports.
-2. Broaden the explicit parity policy if more stress-scene diagnostics need to become gating metrics.
+1. Broaden the explicit parity policy only if more stress-scene diagnostics need to become gating metrics.
+2. Revisit whether any additional benchmark metadata should be promoted into downstream reporting or dashboards.
 
 ### Phase 4: Production grid and IO workflow
 
@@ -132,7 +132,7 @@ Completed:
 3. Extended `ScopeGridRunner` to preserve metadata and assemble results back into `xarray.Dataset`s for the main workflows.
 
 Remaining finish items:
-1. Expose any remaining workflow options needed for parity with current downstream pipelines.
+1. Add any remaining higher-level pipeline wrappers needed to call the now-implemented option-driven runner surface consistently.
 2. Add any remaining tabular or downstream-specific exports needed beyond the shared NetCDF writer only if those are still required by real consumers.
 
 Exit criteria:
@@ -162,18 +162,17 @@ Exit criteria:
 
 ## 4. Suggested Next Step
 
-The next step should be **close the remaining option-level workflow gaps and decide how strict the parity CI lane should become**.
+The next step should be **decide how strict the parity CI lane should become and whether any downstream wrappers still need to be added around the now-stable workflow surface**.
 
 Recommended sequence:
 
-1. Wire any remaining option-level switches, especially `calc_directional` / `calc_vert_profiles` style execution intent in prepared datasets, into whichever runner entry points will own those workflow decisions.
-2. Promote the same-state versus phase-lagged energy-diagnostic distinction into the docs and benchmark summaries so future parity regressions are easier to interpret.
-3. Decide whether the new self-hosted MATLAB parity lane should remain manual or become a required protected-branch signal.
-4. Add mixed-dtype or broader backend coverage only if those execution modes are expected in production use.
-5. Keep `mSCOPE` as a deferred phase until there is a concrete workflow that requires vertically heterogeneous leaf optics.
+1. Decide whether the new self-hosted MATLAB parity lane should remain manual or become a required protected-branch signal.
+2. Add mixed-dtype or broader backend coverage only if those execution modes are expected in production use.
+3. Add any remaining downstream-specific wrappers around `run_scope_dataset(...)` only if a real pipeline needs them.
+4. Keep `mSCOPE` as a deferred phase until there is a concrete workflow that requires vertically heterogeneous leaf optics.
 
 Why this should be next:
 
-1. The core model, ROI/time workflow, benchmark policy, NetCDF export surface, and both runner-level and kernel-level execution coverage are already in place, so the highest remaining risk is option-surface drift rather than missing basic numerical hardening.
+1. The core model, ROI/time workflow, benchmark policy, NetCDF export surface, option-driven workflow dispatch, and both runner-level and kernel-level execution coverage are already in place, so the highest remaining risk is policy/documentation drift rather than missing basic numerical hardening.
 2. The widened scene and time-series suites already constrain the physics stack tightly enough that the remaining workflow-surface work can proceed safely.
 3. CI and committed summary tolerances now exist, which makes it practical to harden the remaining option-level behavior without losing parity visibility.

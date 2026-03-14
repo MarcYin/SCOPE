@@ -40,8 +40,8 @@ scope_grid_netcdf_inmemory_refactored.m  # Legacy MATLAB grid runner reference
 See [PLAN.md](PLAN.md) for the physics summary, staged translation plan, and GPU-oriented design notes. Short version:
 1. **Core physics stack** → leaf optics, 4SAIL reflectance, layered fluorescence, thermal RT, leaf biochemistry, and energy balance are now implemented, and the homogeneous canopy path now exposes explicit directional/profile APIs for reflectance, fluorescence, and thermal RT.
 2. **Current parity status** → the benchmark harness now scales to the full 100-case upstream Latin-hypercube suite, and there is now a separate 30-step upstream time-series parity sweep. Converged scene and time-series steps are locked for reflectance, fluorescence, thermal RT, and the coupled energy products, while non-converged upstream `ebal` cases such as scene `042` and time-series step `026` are tracked separately as stress diagnostics.
-3. **Workflow status** → the grid path is now chunk-local, metadata-preserving, backed by reusable input-preparation helpers, able to write prepared or simulated `xarray` products through the shared NetCDF export layer, and now exposes directional and vertical-profile reflectance, fluorescence, and thermal workflows through the ROI/time runner surface.
-4. **Regression infrastructure** → GitHub Actions now runs the standard Python suite, committed benchmark summaries are versioned in pytest, standalone and coupled runner workflows now have batched-vs-single and dtype coverage, the lower-level kernels now have direct batch/dtype regression coverage with optional CUDA mirrors, and the main remaining infrastructure choice is the MATLAB parity CI policy.
+3. **Workflow status** → the grid path is now chunk-local, metadata-preserving, backed by reusable input-preparation helpers, able to write prepared or simulated `xarray` products through the shared NetCDF export layer, exposes directional and vertical-profile reflectance, fluorescence, and thermal workflows through the ROI/time runner surface, and now has a high-level `run_scope_dataset(...)` entry point that honors prepared-dataset `calc_directional`, `calc_vert_profiles`, `calc_fluor`, and `calc_planck` intent.
+4. **Regression infrastructure** → GitHub Actions now runs the standard Python suite, committed benchmark summaries are versioned in pytest, standalone and coupled runner workflows now have batched-vs-single and dtype coverage, the lower-level kernels now have direct batch/dtype regression coverage with optional CUDA mirrors, and benchmark interpretation plus CI-lane policy are documented in [docs/benchmark-policy.md](docs/benchmark-policy.md).
 5. **Deferred feature** → true `mSCOPE` support is still planned but intentionally deferred until a real workflow needs vertically heterogeneous leaf optics.
 
 ## Testing
@@ -63,6 +63,7 @@ Current coverage is strongest for the implemented kernels:
 
 Benchmark-policy note:
 - Use the committed suite summaries and `leaf_iteration.*` metrics for true same-state parity. Raw `energy_balance.sunlit_*` and `energy_balance.shaded_*` fields in benchmark reports are phase-lagged iterate diagnostics and are not the primary parity contract.
+- See [docs/benchmark-policy.md](docs/benchmark-policy.md) for the summary interpretation order and CI policy.
 
 MATLAB parity tooling is also available:
 
@@ -72,7 +73,7 @@ MATLAB parity tooling is also available:
 - `scripts/run_scope_benchmark_suite.py` now sweeps the full upstream Latin-hypercube case set by default and writes `tests/data/scope_benchmark_suite_summary.json`.
 - `scripts/run_scope_timeseries_benchmark_suite.py` sweeps the upstream 30-step verification time series and writes `tests/data/scope_timeseries_benchmark_summary.json`.
 
-Continuous integration runs the default Python suite on a hosted CPU matrix via [.github/workflows/tests.yml](.github/workflows/tests.yml). The same workflow also exposes opt-in self-hosted GPU and MATLAB parity jobs on manual dispatch.
+Continuous integration runs the default Python suite on a hosted CPU matrix via [.github/workflows/tests.yml](.github/workflows/tests.yml). The same workflow also exposes opt-in self-hosted GPU and MATLAB parity jobs on manual dispatch; those remain optional because they depend on self-hosted hardware and proprietary MATLAB availability.
 
 Self-hosted workflow notes:
 - The GPU job expects a runner labeled `self-hosted`, `linux`, `x64`, `gpu`.
