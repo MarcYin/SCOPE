@@ -1,7 +1,9 @@
 from __future__ import annotations
 
 import importlib
-import warnings
+from importlib.metadata import version
+
+import pytest
 
 
 def test_scope_is_the_public_package_name() -> None:
@@ -10,11 +12,11 @@ def test_scope_is_the_public_package_name() -> None:
     assert hasattr(scope, "ScopeGridRunner")
 
 
-def test_scope_torch_imports_remain_available_as_compatibility_aliases() -> None:
-    with warnings.catch_warnings(record=True) as caught:
-        warnings.simplefilter("always")
-        legacy = importlib.import_module("scope_torch")
+def test_distribution_name_is_scope_rtm() -> None:
+    scope = importlib.import_module("scope")
+    assert version("SCOPE-RTM") == scope.__version__
 
-    assert legacy.ScopeGridRunner is importlib.import_module("scope").ScopeGridRunner
-    assert importlib.import_module("scope_torch.runners.grid").ScopeGridRunner is legacy.ScopeGridRunner
-    assert any(item.category is DeprecationWarning for item in caught)
+
+def test_scope_torch_is_not_importable() -> None:
+    with pytest.raises(ModuleNotFoundError):
+        importlib.import_module("scope_torch")

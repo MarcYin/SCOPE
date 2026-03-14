@@ -148,6 +148,6 @@ __all__ = [
 ]
 
 try:  # pragma: no cover
-    __version__ = _pkg_version("scope")
+    __version__ = _pkg_version("SCOPE-RTM")
 except Exception:  # pragma: no cover
     __version__ = "0.1.0"
