@@ -37,7 +37,7 @@ scope --help
 Clone the repo and fetch the pinned upstream SCOPE checkout:
 
 ```bash
-git clone <your-repo-url> scope
+git clone https://github.com/MarcYin/SCOPE scope
 cd scope
 python scripts/fetch_upstream_scope.py
 ```

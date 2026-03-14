@@ -5,7 +5,7 @@ This page shows the shortest path from a fresh checkout to a successful run.
 ## 1. Install
 
 ```bash
-git clone <your-repo-url> scope
+git clone https://github.com/MarcYin/SCOPE scope
 cd scope
 python scripts/fetch_upstream_scope.py
 python -m venv .venv
