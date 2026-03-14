@@ -20,6 +20,9 @@ concurrency:
   group: tests-${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: true
 
+env:
+  UPSTREAM_SCOPE_COMMIT: e4c2e5109a309e6d2636fd6aa33e0e54b6dd88de
+
 jobs:
   unit-cpu:
     name: Python suite (required CPU)
@@ -31,6 +34,14 @@ jobs:
     steps:
       - name: Check out repository
         uses: actions/checkout@v4
+
+      - name: Fetch pinned upstream SCOPE assets
+        run: |
+          if [ ! -d upstream/SCOPE ]; then
+            git clone https://github.com/Christiaanvandertol/SCOPE.git upstream/SCOPE
+          fi
+          git -C upstream/SCOPE fetch --depth 1 origin "$UPSTREAM_SCOPE_COMMIT"
+          git -C upstream/SCOPE checkout "$UPSTREAM_SCOPE_COMMIT"
 
       - name: Set up Python
         uses: actions/setup-python@v5
@@ -54,6 +65,14 @@ jobs:
     steps:
       - name: Check out repository
         uses: actions/checkout@v4
+
+      - name: Fetch pinned upstream SCOPE assets
+        run: |
+          if [ ! -d upstream/SCOPE ]; then
+            git clone https://github.com/Christiaanvandertol/SCOPE.git upstream/SCOPE
+          fi
+          git -C upstream/SCOPE fetch --depth 1 origin "$UPSTREAM_SCOPE_COMMIT"
+          git -C upstream/SCOPE checkout "$UPSTREAM_SCOPE_COMMIT"
 
       - name: Set up Python
         uses: actions/setup-python@v5
@@ -86,6 +105,14 @@ jobs:
     steps:
       - name: Check out repository
         uses: actions/checkout@v4
+
+      - name: Fetch pinned upstream SCOPE assets
+        run: |
+          if [ ! -d upstream/SCOPE ]; then
+            git clone https://github.com/Christiaanvandertol/SCOPE.git upstream/SCOPE
+          fi
+          git -C upstream/SCOPE fetch --depth 1 origin "$UPSTREAM_SCOPE_COMMIT"
+          git -C upstream/SCOPE checkout "$UPSTREAM_SCOPE_COMMIT"
 
       - name: Set up Python
         uses: actions/setup-python@v5
