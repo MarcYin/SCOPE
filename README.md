@@ -67,13 +67,13 @@ Benchmark-policy note:
 
 MATLAB parity tooling is also available:
 
-- `tests/test_scope_benchmark_parity.py` is the opt-in single-scene MATLAB parity gate.
-- `tests/test_scope_timeseries_benchmark_parity.py` is the opt-in MATLAB time-series parity gate.
+- `tests/test_scope_benchmark_parity.py` now always runs: it exports a fresh MATLAB scene fixture when MATLAB is available and otherwise compares against the checked-in scene fixture.
+- `tests/test_scope_timeseries_benchmark_parity.py` now always runs: it exports fresh MATLAB time-series fixtures when MATLAB is available and otherwise compares against the checked-in time-series fixture set.
 - `scripts/compare_scope_benchmark.py` compares one exported MATLAB fixture against the Python implementation.
 - `scripts/run_scope_benchmark_suite.py` now sweeps the full upstream Latin-hypercube case set by default and writes `tests/data/scope_benchmark_suite_summary.json`.
 - `scripts/run_scope_timeseries_benchmark_suite.py` sweeps the upstream 30-step verification time series and writes `tests/data/scope_timeseries_benchmark_summary.json`.
 
-Continuous integration runs the default Python suite on a hosted CPU matrix via [.github/workflows/tests.yml](.github/workflows/tests.yml). The same workflow also exposes opt-in self-hosted GPU and MATLAB parity jobs on manual dispatch; those remain optional because they depend on self-hosted hardware and proprietary MATLAB availability.
+Continuous integration runs the default Python suite on a hosted CPU matrix via [.github/workflows/tests.yml](.github/workflows/tests.yml), including the MATLAB parity tests in pregenerated-fixture fallback mode when MATLAB is not available. The same workflow also exposes opt-in self-hosted GPU and MATLAB jobs on manual dispatch; the MATLAB lane reruns those parity tests against fresh live MATLAB exports.
 
 Self-hosted workflow notes:
 - The GPU job expects a runner labeled `self-hosted`, `linux`, `x64`, `gpu`.

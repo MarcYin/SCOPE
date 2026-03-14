@@ -105,6 +105,5 @@ jobs:
       - name: Run MATLAB parity tests
         env:
           PYTHONPATH: src
-          SCOPE_BENCHMARK: "1"
-          SCOPE_TIMESERIES_BENCHMARK: "1"
+          SCOPE_REQUIRE_MATLAB: "1"
         run: python -m pytest -q tests/test_scope_benchmark_parity.py tests/test_scope_timeseries_benchmark_parity.py

@@ -15,11 +15,11 @@
 | Energy balance closure | `CanopyEnergyBalanceModel` iterates temperatures, boundary humidity/CO2, aerodynamic resistances, and coupled fluorescence/thermal outputs. | [src/scope_torch/energy/balance.py](src/scope_torch/energy/balance.py), [tests/energy/test_balance.py](tests/energy/test_balance.py) |
 | Grid execution | `ScopeGridDataModule` now batches chunk-locally, and `ScopeGridRunner` exposes reflectance, reflectance profiles, directional reflectance, fluorescence, fluorescence profiles, directional fluorescence, biochemical fluorescence, thermal RT, thermal profiles, directional thermal, and coupled energy-balance workflows over ROI/time batches. | [src/scope_torch/data/grid.py](src/scope_torch/data/grid.py), [src/scope_torch/runners/grid.py](src/scope_torch/runners/grid.py), [tests/test_grid_data_module.py](tests/test_grid_data_module.py), [tests/test_scope_grid_runner.py](tests/test_scope_grid_runner.py) |
 | IO preparation | Input preparation has a reusable library surface in `scope_torch.io.prepare`, the old script is a thin CLI wrapper, and NetCDF export helpers now cover prepared and simulated `xarray` datasets. | [src/scope_torch/io/prepare.py](src/scope_torch/io/prepare.py), [src/scope_torch/io/export.py](src/scope_torch/io/export.py), [prepare_scope_input.py](prepare_scope_input.py), [tests/test_prepare_scope_input.py](tests/test_prepare_scope_input.py), [tests/test_netcdf_export.py](tests/test_netcdf_export.py) |
-| Regression automation | Committed benchmark summaries, opt-in MATLAB parity gates, and standard pytest automation are now present. | [tests/test_benchmark_summary_regression.py](tests/test_benchmark_summary_regression.py), [tests/test_scope_benchmark_parity.py](tests/test_scope_benchmark_parity.py), [tests/test_scope_timeseries_benchmark_parity.py](tests/test_scope_timeseries_benchmark_parity.py), [.github/workflows/tests.yml](.github/workflows/tests.yml) |
+| Regression automation | Committed benchmark summaries, live-or-pregenerated MATLAB parity tests, and standard pytest automation are now present. | [tests/test_benchmark_summary_regression.py](tests/test_benchmark_summary_regression.py), [tests/test_scope_benchmark_parity.py](tests/test_scope_benchmark_parity.py), [tests/test_scope_timeseries_benchmark_parity.py](tests/test_scope_timeseries_benchmark_parity.py), [.github/workflows/tests.yml](.github/workflows/tests.yml) |
 
 ### Still incomplete or narrow
 
-1. The default CI path covers the Python test suite and committed benchmark summaries, but it does not run MATLAB parity gates automatically because those require self-hosted licensed infrastructure.
+1. The default CI path now runs the MATLAB parity tests in live-or-pregenerated mode, but dedicated fresh-export MATLAB runs still require self-hosted licensed infrastructure.
 2. Device coverage is substantially improved but still not exhaustive: standalone and coupled runner workflows now have batched-vs-single and dtype coverage, the lower-level kernel layer now has direct batch/dtype regression tests with optional CUDA mirrors, but mixed-dtype and broader backend coverage are still missing.
 3. Workflow parity now includes high-level option-driven directional/profile dispatch through the shared runner surface, but it is still narrow around downstream export targets beyond the current shared NetCDF writer and any pipeline-specific workflow wrappers.
 
@@ -144,15 +144,15 @@ Exit criteria:
 Status: substantially complete.
 
 Completed:
-1. Kept the widened 100-case MATLAB suite and the single-scene/time-series parity gates in sync with the benchmark exports.
+1. Kept the widened 100-case MATLAB suite and the single-scene/time-series parity gates in sync with the benchmark exports, including pregenerated-fixture fallback when MATLAB is unavailable.
 2. Turned the committed suite summaries into versioned tolerances in pytest.
 3. Added coupled batched-vs-single regression checks and an optional CPU-vs-GPU check for the energy/thermal path.
 4. Added batched-vs-single and dtype regression coverage for the standalone reflectance, fluorescence, biochemical fluorescence, thermal, coupled energy-balance fluorescence, and coupled energy-balance thermal runner paths, plus optional CUDA mirrors on selected workflows.
 5. Wired the standard Python test suite into GitHub Actions CI.
-6. Added opt-in self-hosted GPU and MATLAB parity jobs to the GitHub Actions workflow.
+6. Added opt-in self-hosted GPU and live-MATLAB parity jobs to the GitHub Actions workflow.
 
 Remaining finish items:
-1. Decide whether the current opt-in self-hosted MATLAB lane should eventually become a required branch-protection signal.
+1. Decide whether the current opt-in self-hosted live-MATLAB lane should eventually become a required branch-protection signal.
 2. Add mixed-dtype or broader backend coverage if those execution modes are expected in production use.
 
 Exit criteria:
@@ -166,7 +166,7 @@ The next step should be **decide how strict the parity CI lane should become and
 
 Recommended sequence:
 
-1. Decide whether the new self-hosted MATLAB parity lane should remain manual or become a required protected-branch signal.
+1. Decide whether the new self-hosted live-MATLAB parity lane should remain manual or become a required protected-branch signal.
 2. Add mixed-dtype or broader backend coverage only if those execution modes are expected in production use.
 3. Add any remaining downstream-specific wrappers around `run_scope_dataset(...)` only if a real pipeline needs them.
 4. Keep `mSCOPE` as a deferred phase until there is a concrete workflow that requires vertically heterogeneous leaf optics.

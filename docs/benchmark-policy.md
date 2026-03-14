@@ -24,9 +24,14 @@ The generated benchmark summaries now encode those replacements directly in thei
 
 The default required lane is the hosted CPU Python suite in [`tests.yml`](../.github/workflows/tests.yml).
 
-The GPU and MATLAB parity lanes remain opt-in because they require self-hosted infrastructure:
+The hosted CPU lane still runs the MATLAB parity tests, but in fallback mode:
+
+- If MATLAB is available, the parity tests export fresh MATLAB fixtures and compare against those live outputs.
+- If MATLAB is not available, the same tests compare against the checked-in pregenerated MATLAB fixture set.
+
+The GPU and dedicated live-MATLAB lanes remain opt-in because they require self-hosted infrastructure:
 
 - GPU needs a self-hosted CUDA runner.
-- MATLAB parity needs a self-hosted MATLAB runner and a licensed MATLAB installation.
+- Live MATLAB parity needs a self-hosted MATLAB runner and a licensed MATLAB installation.
 
-That keeps the required CI signal reproducible on standard GitHub-hosted infrastructure while still making the stronger parity checks available on demand.
+That keeps the required CI signal reproducible on standard GitHub-hosted infrastructure while still making the stronger live-MATLAB checks available on demand.
