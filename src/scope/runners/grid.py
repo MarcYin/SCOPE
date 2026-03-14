@@ -39,6 +39,7 @@ from ..canopy.foursail import FourSAILModel
 from ..spectral.fluspect import FluspectModel, LeafBioBatch
 from ..spectral.loaders import SoilSpectraLibrary, load_fluspect_resources, load_soil_spectra
 from ..spectral.soil import SoilBSMModel, SoilEmpiricalParams
+from ..variables import annotate_dataset
 from ..data import ScopeGridDataModule
 
 
@@ -1364,11 +1365,11 @@ class ScopeGridRunner:
         attrs["scope_product"] = product
         attrs["scope_components"] = ",".join(components)
         merged.attrs = attrs
-        return merged
+        return annotate_dataset(merged)
 
     def _prefixed_dataset(self, dataset: xr.Dataset, prefix: str) -> xr.Dataset:
         rename_map = {name: f"{prefix}_{name}" for name in dataset.data_vars}
-        return dataset.rename(rename_map)
+        return annotate_dataset(dataset.rename(rename_map))
 
     def _directional_outputs_to_dataset(
         self,

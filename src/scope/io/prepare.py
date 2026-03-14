@@ -14,6 +14,7 @@ except Exception:  # pragma: no cover
     rioxarray = None
 
 from ..spectral.loaders import load_scope_filenames, scope_root
+from ..variables import annotate_dataset
 
 BIO_BANDS = ("N", "cab", "cm", "cw", "lai", "ala", "cbrown")
 BIO_SCALES = (1 / 100.0, 1 / 100.0, 1 / 10000.0, 1 / 10000.0, 1 / 100.0, 1 / 100.0, 1 / 1000.0)
@@ -244,7 +245,7 @@ def prepare_scope_input_dataset(
     if scope_options:
         dataset.attrs.update(scope_options)
     dataset.attrs.update((scope_files or ScopeInputFiles()).resolve(scope_root_path))
-    return dataset
+    return annotate_dataset(dataset)
 
 
 def _resolve_scope_file(

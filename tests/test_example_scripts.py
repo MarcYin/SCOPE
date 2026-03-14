@@ -65,3 +65,20 @@ def test_scope_workflow_demo_matches_checked_output(tmp_path: Path) -> None:
     actual = _run_example("scope_workflow_demo.py", tmp_path / "scope_workflow_demo.json")
     expected = _load_json(REPO_ROOT / "examples" / "output" / "scope_workflow_demo.json")
     _assert_json_close(actual, expected)
+
+
+def test_render_example_visuals_script_bootstraps_src_path() -> None:
+    if not SCOPE_ROOT.exists():
+        pytest.skip("Upstream SCOPE assets are not available")
+
+    command = [
+        sys.executable,
+        str(REPO_ROOT / "scripts" / "render_example_visuals.py"),
+    ]
+    env = os.environ.copy()
+    env.pop("PYTHONPATH", None)
+    completed = subprocess.run(command, cwd=REPO_ROOT, env=env, check=True, capture_output=True, text=True)
+
+    assert "docs/assets/basic_scene_reflectance.svg" in completed.stdout
+    assert "docs/assets/scope_workflow_fluorescence.svg" in completed.stdout
+    assert "docs/assets/scope_workflow_profile.svg" in completed.stdout

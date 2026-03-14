@@ -126,6 +126,20 @@ def test_scope_module_variable_search_cli():
     assert "relationship: Rntot = Rnctot + Rnstot" in completed.stdout
 
 
+def test_scope_module_variable_search_cli_supports_workflow_and_related_filters():
+    completed = subprocess.run(
+        [sys.executable, "-m", "scope", "vars", "--workflow", "fluorescence", "--related", "sigmaF"],
+        cwd=REPO_ROOT,
+        env=_clean_env(),
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+
+    assert "LoF_" in completed.stdout
+    assert "source:" in completed.stdout
+
+
 def test_scope_module_run_cli_executes_minimal_reflectance_workflow(tmp_path: Path):
     if not SCOPE_ROOT.exists():
         pytest.skip("Upstream SCOPE assets are not available")

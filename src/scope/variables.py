@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, fields
 from typing import Iterable, Sequence
 
 
@@ -14,6 +14,7 @@ class VariableDefinition:
     workflows: tuple[str, ...] = ()
     aliases: tuple[str, ...] = ()
     relationship: str = ""
+    source_doc: str = ""
     notes: str = ""
 
     def search_blob(self) -> str:
@@ -24,6 +25,7 @@ class VariableDefinition:
             self.units,
             self.meaning,
             self.relationship,
+            self.resolved_source_doc(),
             self.notes,
             *self.workflows,
             *self.aliases,
@@ -31,7 +33,12 @@ class VariableDefinition:
         return " ".join(part.lower() for part in parts if part)
 
     def to_dict(self) -> dict[str, object]:
-        return asdict(self)
+        payload = asdict(self)
+        payload["source_doc"] = self.resolved_source_doc()
+        return payload
+
+    def resolved_source_doc(self) -> str:
+        return self.source_doc or _default_source_doc(self)
 
 
 def _v(
@@ -44,6 +51,7 @@ def _v(
     workflows: Sequence[str] = (),
     aliases: Sequence[str] = (),
     relationship: str = "",
+    source_doc: str = "",
     notes: str = "",
 ) -> VariableDefinition:
     return VariableDefinition(
@@ -55,6 +63,7 @@ def _v(
         workflows=tuple(workflows),
         aliases=tuple(aliases),
         relationship=relationship,
+        source_doc=source_doc,
         notes=notes,
     )
 
@@ -300,16 +309,92 @@ VARIABLES = VARIABLES + (
 )
 
 
-def iter_variables() -> tuple[VariableDefinition, ...]:
-    return VARIABLES
+_WORKFLOW_CATEGORY_MAP: dict[str, tuple[str, ...]] = {
+    "prepare": (
+        "grid",
+        "workflow",
+        "geometry",
+        "meteorology",
+        "soil",
+        "canopy structure",
+        "leaf biochemistry",
+        "spectral forcing",
+    ),
+    "reflectance": (
+        "reflectance",
+        "canopy structure",
+        "leaf biochemistry",
+        "geometry",
+        "soil",
+        "profiles",
+    ),
+    "fluorescence": (
+        "fluorescence",
+        "fluorescence transport",
+        "transport coefficients",
+        "profiles",
+        "physiology",
+        "leaf biochemistry",
+        "canopy structure",
+        "geometry",
+        "soil",
+        "spectral forcing",
+    ),
+    "thermal": (
+        "thermal",
+        "thermal optics",
+        "thermal state",
+        "profiles",
+        "canopy structure",
+        "geometry",
+    ),
+    "energy-balance": (
+        "energy balance",
+        "resistance",
+        "meteorology",
+        "canopy aerodynamics",
+        "soil",
+        "thermal",
+        "thermal state",
+        "boundary state",
+        "physiology",
+        "solver",
+        "solver diagnostics",
+        "structured outputs",
+    ),
+}
+
+_DEFAULT_SOURCE_DOCS: dict[str, str] = {
+    "dimension": "docs/input-output-reference.md",
+    "option": "docs/input-output-reference.md",
+    "input": "docs/input-output-reference.md",
+}
+
+_CATEGORY_SOURCE_DOCS: dict[str, str] = {
+    "reflectance": "https://scope-model.readthedocs.io/en/master/outfiles.html",
+    "fluorescence": "https://scope-model.readthedocs.io/en/master/outfiles.html",
+    "thermal": "https://scope-model.readthedocs.io/en/master/outfiles.html",
+    "energy balance": "https://scope-model.readthedocs.io/en/master/outfiles.html",
+    "resistance": "https://scope-model.readthedocs.io/en/master/outfiles.html",
+    "profiles": "https://scope-model.readthedocs.io/en/master/outfiles.html",
+    "transport coefficients": "https://scope-model.readthedocs.io/en/master/outfiles.html",
+    "physiology": "https://scope-model.readthedocs.io/en/master/outfiles.html",
+    "thermal state": "https://scope-model.readthedocs.io/en/master/outfiles.html",
+    "boundary state": "https://scope-model.readthedocs.io/en/master/outfiles.html",
+    "solver diagnostics": "https://scope-model.readthedocs.io/en/master/outfiles.html",
+}
 
 
-def search_variables(
-    query: str | None = None,
+def _default_source_doc(item: VariableDefinition) -> str:
+    return _CATEGORY_SOURCE_DOCS.get(item.category, _DEFAULT_SOURCE_DOCS.get(item.kind, "docs/variable-glossary.md"))
+
+
+def iter_variables(
     *,
     kind: str | None = None,
     category: str | None = None,
-) -> list[VariableDefinition]:
+    workflow: str | None = None,
+) -> tuple[VariableDefinition, ...]:
     items = list(VARIABLES)
     if kind is not None:
         lowered = kind.lower()
@@ -317,6 +402,42 @@ def search_variables(
     if category is not None:
         lowered = category.lower()
         items = [item for item in items if item.category.lower() == lowered]
+    if workflow is not None:
+        items = [item for item in items if _matches_workflow(item, workflow)]
+    return tuple(items)
+
+
+def get_variable_definition(name: str) -> VariableDefinition | None:
+    lowered = name.lower()
+    for item in VARIABLES:
+        if item.name.lower() == lowered or lowered in {alias.lower() for alias in item.aliases}:
+            return item
+    if lowered.startswith("sunlit_") or lowered.startswith("shaded_"):
+        prefix, _, _ = lowered.partition("_")
+        wildcard = f"{prefix}_*"
+        for item in VARIABLES:
+            if item.name.lower() == wildcard:
+                return item
+    parts = lowered.split("_")
+    for index in range(1, len(parts)):
+        suffix = "_".join(parts[index:])
+        for item in VARIABLES:
+            if item.name.lower() == suffix:
+                return item
+    return None
+
+
+def search_variables(
+    query: str | None = None,
+    *,
+    kind: str | None = None,
+    category: str | None = None,
+    workflow: str | None = None,
+    related_to: str | None = None,
+) -> list[VariableDefinition]:
+    items = list(iter_variables(kind=kind, category=category, workflow=workflow))
+    if related_to:
+        items = _related_items(related_to, items)
     if not query:
         return items
 
@@ -337,6 +458,117 @@ def search_variables(
     if matches:
         return sorted(matches, key=lambda item: _match_rank(item, lowered_query))
     return []
+
+
+def variable_attrs(name: str) -> dict[str, object]:
+    item = get_variable_definition(name)
+    if item is None:
+        return {}
+    attrs: dict[str, object] = {
+        "long_name": item.meaning,
+        "units": item.units,
+        "description": item.meaning,
+        "scope_kind": item.kind,
+        "scope_category": item.category,
+        "scope_name": item.name,
+        "scope_source_doc": item.resolved_source_doc(),
+    }
+    if item.relationship:
+        attrs["scope_relationship"] = item.relationship
+    if item.aliases:
+        attrs["scope_aliases"] = ",".join(item.aliases)
+    if item.workflows:
+        attrs["scope_workflows"] = ",".join(item.workflows)
+    if item.notes:
+        attrs["scope_notes"] = item.notes
+    return attrs
+
+
+def annotate_dataset(dataset):
+    annotated = dataset.copy(deep=False)
+    for name in annotated.data_vars:
+        attrs = dict(annotated[name].attrs)
+        attrs.update(variable_attrs(name))
+        annotated[name].attrs = attrs
+    for name in annotated.coords:
+        attrs = dict(annotated.coords[name].attrs)
+        attrs.update(variable_attrs(name))
+        if "units" in attrs:
+            dtype = getattr(annotated.coords[name], "dtype", None)
+            if dtype is not None and getattr(dtype, "kind", "") in {"M", "m"}:
+                attrs["scope_units"] = attrs.pop("units")
+        annotated.coords[name].attrs = attrs
+    return annotated
+
+
+def apply_registry_docstrings(*classes: type[object]) -> None:
+    for cls in classes:
+        try:
+            class_fields = fields(cls)
+        except TypeError:
+            continue
+        field_lines = []
+        for field in class_fields:
+            item = get_variable_definition(field.name)
+            if item is None:
+                continue
+            line = f"- `{field.name}`: {item.meaning}"
+            if item.units:
+                line += f" [{item.units}]"
+            if item.relationship:
+                line += f". Relationship: {item.relationship}"
+            field_lines.append(line)
+        if not field_lines:
+            continue
+        prefix = (cls.__doc__ or f"{cls.__name__}.").rstrip()
+        cls.__doc__ = prefix + "\n\nFields:\n" + "\n".join(field_lines)
+
+
+def render_workflow_variable_markdown(workflow: str) -> str:
+    items = search_variables(workflow=workflow)
+    title = workflow.replace("-", " ").title()
+    lines = [
+        f"# {title} Variables",
+        "",
+        f"This page is generated from the in-repo variable registry for the `{workflow}` workflow family.",
+        "",
+        f"Use `scope vars --workflow {workflow}` for terminal lookup.",
+        "",
+    ]
+    grouped: dict[str, list[VariableDefinition]] = {}
+    for item in items:
+        grouped.setdefault(item.category, []).append(item)
+    for category, category_items in grouped.items():
+        lines.append(f"## {category.title()}")
+        lines.append("")
+        lines.extend(_render_table(category_items))
+        lines.append("")
+    return "\n".join(lines).rstrip() + "\n"
+
+
+def _matches_workflow(item: VariableDefinition, workflow: str) -> bool:
+    lowered = workflow.lower()
+    if lowered in {entry.lower() for entry in item.workflows}:
+        return True
+    return item.category.lower() in {category.lower() for category in _WORKFLOW_CATEGORY_MAP.get(lowered, ())}
+
+
+def _related_items(name: str, items: Sequence[VariableDefinition]) -> list[VariableDefinition]:
+    target = get_variable_definition(name)
+    if target is None:
+        return []
+    target_name = target.name.lower()
+    relationship_hits = [
+        item
+        for item in items
+        if item.name != target.name
+        and (
+            target_name in item.relationship.lower()
+            or item.name.lower() in target.relationship.lower()
+            or item.category == target.category
+        )
+    ]
+    return sorted(relationship_hits, key=lambda item: (0 if target_name in item.relationship.lower() else 1, len(item.name), item.name))
 
 
 def _match_rank(item: VariableDefinition, lowered_query: str) -> tuple[int, int, str]:
@@ -363,6 +595,7 @@ def render_variable_markdown() -> str:
         "",
         "- browser search through the MkDocs site search bar",
         "- terminal lookup with `scope vars <name>`",
+        "- workflow filtering with `scope vars --workflow fluorescence`",
         "",
         "The physical meanings are aligned to the current Python implementation and, where relevant, to the original SCOPE documentation at <https://scope-model.readthedocs.io/en/master/outfiles.html>.",
         "",
@@ -389,14 +622,14 @@ def render_variable_markdown() -> str:
 
 def _render_table(items: Iterable[VariableDefinition]) -> list[str]:
     lines = [
-        "| Name | Units | Meaning | Relationship / formula | Workflows / aliases |",
-        "| --- | --- | --- | --- | --- |",
+        "| Name | Units | Meaning | Relationship / formula | Source | Workflows / aliases |",
+        "| --- | --- | --- | --- | --- | --- |",
     ]
     for item in items:
         workflow_text = ", ".join(item.workflows)
         alias_text = ", ".join(item.aliases)
         meta = "; ".join(part for part in (workflow_text, alias_text, item.notes) if part)
         lines.append(
-            f"| `{item.name}` | {item.units} | {item.meaning} | {item.relationship or '-'} | {meta or '-'} |"
+            f"| `{item.name}` | {item.units} | {item.meaning} | {item.relationship or '-'} | {item.resolved_source_doc()} | {meta or '-'} |"
         )
     return lines

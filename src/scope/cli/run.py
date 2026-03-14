@@ -12,7 +12,7 @@ import xarray as xr
 from .. import ScopeGridRunner, campbell_lidf
 from ..config import SimulationConfig
 from ..data import ScopeGridDataModule
-from ..io import NetCDFWriteOptions, write_netcdf_dataset
+from ..io import NetCDFWriteOptions, validate_scope_dataset, write_netcdf_dataset
 
 
 _WORKFLOW_RUNNERS: Mapping[str, str] = {
@@ -77,6 +77,7 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
 def run(args: argparse.Namespace) -> Path:
     dataset = xr.open_dataset(args.input)
     try:
+        _validate_input_dataset(args, dataset)
         runner = _build_runner(args, dataset)
         data_module = _build_data_module(args, dataset)
         outputs = _run_workflow(args, runner, data_module)
@@ -173,6 +174,24 @@ def _run_workflow(args: argparse.Namespace, runner: ScopeGridRunner, data_module
         kwargs["soil_heat_method"] = args.soil_heat_method
 
     return method(data_module, **kwargs)
+
+
+def _validate_input_dataset(args: argparse.Namespace, dataset: xr.Dataset) -> None:
+    scope_options = {
+        key: value
+        for key, value in {
+            "calc_fluor": args.calc_fluor,
+            "calc_planck": args.calc_planck,
+            "calc_directional": args.calc_directional,
+            "calc_vert_profiles": args.calc_vert_profiles,
+        }.items()
+        if value is not None
+    }
+    validate_scope_dataset(
+        dataset,
+        workflow=args.workflow,
+        scope_options=scope_options if args.workflow == "scope" else None,
+    )
 
 
 def _infer_roi_bounds(dataset: xr.Dataset) -> tuple[float, float, float, float]:

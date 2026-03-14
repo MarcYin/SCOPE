@@ -63,6 +63,7 @@ from .io import (
     prepare_scope_input_dataset,
     read_s2_bio_inputs,
     resolve_netcdf_engine,
+    validate_scope_dataset,
     write_netcdf_dataset,
 )
 from .data import ScopeGridDataModule
@@ -70,7 +71,17 @@ from .runners import ScopeGridRunner
 from .spectral.fluspect import FluspectModel, LeafBioBatch, LeafOptics, OptiPar, SpectralGrids
 from .spectral.loaders import FluspectResources, SoilSpectraLibrary, load_fluspect_resources, load_scope_filenames, load_soil_spectra
 from .spectral.soil import BSMSoilParameters, SoilBSMModel, SoilEmpiricalParams
-from .variables import VariableDefinition, iter_variables, render_variable_markdown, search_variables
+from .variables import (
+    VariableDefinition,
+    annotate_dataset,
+    apply_registry_docstrings,
+    get_variable_definition,
+    iter_variables,
+    render_variable_markdown,
+    render_workflow_variable_markdown,
+    search_variables,
+    variable_attrs,
+)
 
 __all__ = [
     "SimulationConfig",
@@ -93,12 +104,16 @@ __all__ = [
     "SoilBSMModel",
     "SoilEmpiricalParams",
     "VariableDefinition",
+    "annotate_dataset",
     "load_fluspect_resources",
     "load_scope_filenames",
     "load_soil_spectra",
+    "get_variable_definition",
     "iter_variables",
     "render_variable_markdown",
+    "render_workflow_variable_markdown",
     "search_variables",
+    "variable_attrs",
     "FourSAILModel",
     "FourSAILResult",
     "CanopyFluorescenceModel",
@@ -149,6 +164,7 @@ __all__ = [
     "scope_lazitab",
     "scope_lidf",
     "scope_litab",
+    "validate_scope_dataset",
     "write_netcdf_dataset",
 ]
 
@@ -156,3 +172,22 @@ try:  # pragma: no cover
     __version__ = _pkg_version("SCOPE-RTM")
 except Exception:  # pragma: no cover
     __version__ = "0.1.0"
+
+
+apply_registry_docstrings(
+    LeafBiochemistryInputs,
+    LeafBiochemistryResult,
+    CanopyReflectanceResult,
+    CanopyRadiationProfileResult,
+    CanopyDirectionalReflectanceResult,
+    CanopyFluorescenceResult,
+    CanopyFluorescenceProfileResult,
+    CanopyDirectionalFluorescenceResult,
+    CanopyBiochemicalFluorescenceResult,
+    CanopyThermalRadianceResult,
+    CanopyThermalProfileResult,
+    CanopyDirectionalThermalResult,
+    CanopyEnergyBalanceResult,
+    CanopyEnergyBalanceFluorescenceResult,
+    CanopyEnergyBalanceThermalResult,
+)

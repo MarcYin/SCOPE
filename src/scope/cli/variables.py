@@ -18,6 +18,12 @@ def build_parser() -> argparse.ArgumentParser:
         help="Restrict results to one variable kind.",
     )
     parser.add_argument("--category", help="Restrict results to a single category, for example 'reflectance' or 'meteorology'.")
+    parser.add_argument(
+        "--workflow",
+        choices=("prepare", "reflectance", "fluorescence", "thermal", "energy-balance"),
+        help="Restrict results to one workflow family.",
+    )
+    parser.add_argument("--related", help="Show variables directly related to the given variable name.")
     parser.add_argument("--json", action="store_true", help="Emit machine-readable JSON instead of a plain-text table.")
     parser.add_argument("--all", action="store_true", help="List all registry entries.")
     return parser
@@ -28,12 +34,18 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
 
 
 def run(args: argparse.Namespace) -> list[dict[str, object]]:
-    if args.all and args.query:
-        raise ValueError("--all and query cannot be used together")
+    if args.all and (args.query or args.related):
+        raise ValueError("--all cannot be used together with query or --related")
     if args.all:
-        matches = list(iter_variables())
+        matches = list(iter_variables(kind=args.kind, category=args.category, workflow=args.workflow))
     else:
-        matches = search_variables(args.query, kind=args.kind, category=args.category)
+        matches = search_variables(
+            args.query,
+            kind=args.kind,
+            category=args.category,
+            workflow=args.workflow,
+            related_to=args.related,
+        )
     rows = [match.to_dict() for match in matches]
     if args.json:
         print(json.dumps(rows, indent=2))
@@ -58,6 +70,7 @@ def _render_text(rows: list[dict[str, object]]) -> str:
         aliases = ", ".join(row["aliases"])
         workflows = ", ".join(row["workflows"])
         relationship = str(row.get("relationship", "")).strip()
+        source_doc = str(row.get("source_doc", "")).strip()
         meta = "; ".join(part for part in (workflows, aliases, row["notes"]) if part)
         header = (
             f"{row['name']:<{name_width}}  "
@@ -69,6 +82,8 @@ def _render_text(rows: list[dict[str, object]]) -> str:
         lines.append(f"  {row['meaning']}")
         if relationship:
             lines.append(f"  relationship: {relationship}")
+        if source_doc:
+            lines.append(f"  source: {source_doc}")
         if meta:
             lines.append(f"  {meta}")
         lines.append("")

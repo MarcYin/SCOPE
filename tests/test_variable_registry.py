@@ -21,7 +21,16 @@ from scope.canopy.thermal import (
 )
 from scope.energy import CanopyEnergyBalanceResult
 from scope.io.prepare import DEFAULT_SCOPE_OPTIONS
-from scope.variables import render_variable_markdown, search_variables
+import xarray as xr
+
+from scope.variables import (
+    annotate_dataset,
+    get_variable_definition,
+    render_variable_markdown,
+    render_workflow_variable_markdown,
+    search_variables,
+    variable_attrs,
+)
 
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
@@ -50,11 +59,43 @@ def test_search_variables_exposes_relationship_notes() -> None:
     assert matches[0].relationship == "Rntot = Rnctot + Rnstot"
 
 
+def test_search_variables_filters_by_workflow_and_related_terms() -> None:
+    fluorescence = search_variables(workflow="fluorescence")
+    related = search_variables(related_to="Rntot")
+
+    assert any(match.name == "LoF_" for match in fluorescence)
+    assert any(match.name == "Rnctot" for match in related)
+
+
 def test_variable_glossary_doc_is_generated_from_registry() -> None:
     expected = render_variable_markdown()
     actual = (REPO_ROOT / "docs" / "variable-glossary.md").read_text(encoding="utf-8")
 
     assert actual == expected
+
+
+def test_workflow_variable_guides_are_generated_from_registry() -> None:
+    for workflow in ("reflectance", "fluorescence", "thermal", "energy-balance"):
+        expected = render_workflow_variable_markdown(workflow)
+        actual = (REPO_ROOT / "docs" / "workflow-variables" / f"{workflow}.md").read_text(encoding="utf-8")
+
+        assert actual == expected
+
+
+def test_variable_attrs_and_dataset_annotation_include_registry_metadata() -> None:
+    attrs = variable_attrs("Rntot")
+    dataset = annotate_dataset(xr.Dataset({"Rntot": (("time",), [123.0])}, coords={"time": [0]}))
+
+    assert attrs["long_name"] == "Total net radiation."
+    assert attrs["scope_relationship"] == "Rntot = Rnctot + Rnstot"
+    assert dataset["Rntot"].attrs["scope_source_doc"]
+    assert dataset["time"].attrs["long_name"] == "Time axis for scenes or time-series runs."
+
+
+def test_public_result_docstrings_are_registry_backed() -> None:
+    assert "Fields:" in CanopyReflectanceResult.__doc__
+    assert "`rsot`" in CanopyReflectanceResult.__doc__
+    assert get_variable_definition("rsot") is not None
 
 
 def test_variable_registry_covers_public_result_dataclass_fields() -> None:

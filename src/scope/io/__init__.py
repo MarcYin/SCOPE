@@ -14,6 +14,7 @@ from .prepare import (
     prepare_scope_input_dataset,
     read_s2_bio_inputs,
 )
+from .schema import validate_scope_dataset
 
 __all__ = [
     "DEFAULT_SCOPE_OPTIONS",
@@ -25,5 +26,6 @@ __all__ = [
     "prepare_scope_input_dataset",
     "read_s2_bio_inputs",
     "resolve_netcdf_engine",
+    "validate_scope_dataset",
     "write_netcdf_dataset",
 ]

@@ -8,6 +8,7 @@ import torch
 import xarray as xr
 
 from ..config import SimulationConfig
+from ..variables import annotate_dataset
 
 
 @dataclass(slots=True)
@@ -88,7 +89,7 @@ class ScopeGridDataModule:
         for coord_name, coord in self.dataset.coords.items():
             if coord_name not in dataset.coords and set(coord.dims).issubset(dataset.dims):
                 dataset = dataset.assign_coords({coord_name: coord})
-        return dataset
+        return annotate_dataset(dataset)
 
     def _coord_values(
         self,
