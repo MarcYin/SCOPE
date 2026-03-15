@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import json
 from dataclasses import dataclass
+from datetime import datetime, timezone
+from importlib.metadata import version as package_version
 from importlib.util import find_spec
 from pathlib import Path
 from typing import Any, Mapping, Sequence
@@ -103,7 +105,7 @@ def write_netcdf_dataset(
     path = Path(output_path)
     path.parent.mkdir(parents=True, exist_ok=True)
 
-    sanitized = _sanitize_netcdf_dataset(dataset)
+    sanitized = _sanitize_netcdf_dataset(_cf_enrich_dataset(dataset))
     kwargs: dict[str, object] = {
         "path": path,
         "engine": engine,
@@ -126,6 +128,67 @@ def _sanitize_netcdf_dataset(dataset: xr.Dataset) -> xr.Dataset:
     for name in sanitized.variables:
         sanitized[name].attrs = _sanitize_attr_mapping(dataset[name].attrs)
     return sanitized
+
+
+def _cf_enrich_dataset(dataset: xr.Dataset) -> xr.Dataset:
+    enriched = dataset.copy(deep=False)
+    enriched.attrs = _cf_global_attrs(enriched)
+    for name in enriched.coords:
+        attrs = dict(enriched.coords[name].attrs)
+        attrs.update(_cf_coord_attrs(name))
+        enriched.coords[name].attrs = attrs
+    return enriched
+
+
+def _cf_global_attrs(dataset: xr.Dataset) -> dict[str, Any]:
+    attrs = dict(dataset.attrs)
+    attrs.setdefault("Conventions", "CF-1.10")
+    product = str(attrs.get("scope_product", "dataset")).replace("_", " ")
+    default_title = "SCOPE-RTM dataset" if product == "dataset" else f"SCOPE-RTM {product} dataset"
+    attrs.setdefault("title", default_title)
+    attrs.setdefault("source", f"SCOPE-RTM {_scope_version()}")
+    attrs.setdefault(
+        "references",
+        "https://scope-model.readthedocs.io/en/master/; https://github.com/Christiaanvandertol/SCOPE",
+    )
+    history_entry = (
+        f"{datetime.now(timezone.utc).strftime('%Y-%m-%dT%H:%M:%SZ')}: "
+        "wrote NetCDF with scope.write_netcdf_dataset"
+    )
+    existing_history = _sanitize_history_attr(attrs.get("history"))
+    if existing_history not in {None, ""}:
+        attrs["history"] = f"{existing_history}\n{history_entry}"
+    else:
+        attrs["history"] = history_entry
+    return attrs
+
+
+def _scope_version() -> str:
+    try:
+        return package_version("SCOPE-RTM")
+    except Exception:  # pragma: no cover
+        return "unknown"
+
+
+def _cf_coord_attrs(name: str) -> dict[str, str]:
+    if name == "time":
+        return {"standard_name": "time", "axis": "T"}
+    if name == "x":
+        return {"axis": "X"}
+    if name == "y":
+        return {"axis": "Y"}
+    if name in {"layer", "layer_interface"}:
+        return {"positive": "down"}
+    return {}
+
+
+def _sanitize_history_attr(value: Any) -> str | None:
+    sanitized = _sanitize_attr_value(value)
+    if sanitized is None:
+        return None
+    if isinstance(sanitized, bytes):
+        return sanitized.decode("utf-8", errors="replace")
+    return str(sanitized)
 
 
 def _sanitize_attr_mapping(attrs: Mapping[str, Any]) -> dict[str, Any]:

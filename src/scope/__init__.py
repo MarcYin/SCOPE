@@ -67,6 +67,7 @@ from .io import (
     write_netcdf_dataset,
 )
 from .data import ScopeGridDataModule
+from .inference import ScopeInferenceModel, select_inference_outputs
 from .runners import ScopeGridRunner
 from .spectral.fluspect import FluspectModel, LeafBioBatch, LeafOptics, OptiPar, SpectralGrids
 from .spectral.loaders import FluspectResources, SoilSpectraLibrary, load_fluspect_resources, load_scope_filenames, load_soil_spectra
@@ -86,6 +87,7 @@ from .variables import (
 __all__ = [
     "SimulationConfig",
     "ScopeGridDataModule",
+    "ScopeInferenceModel",
     "ScopeGridRunner",
     "BiochemicalOptions",
     "BiochemicalTemperatureResponse",
@@ -113,6 +115,7 @@ __all__ = [
     "render_variable_markdown",
     "render_workflow_variable_markdown",
     "search_variables",
+    "select_inference_outputs",
     "variable_attrs",
     "FourSAILModel",
     "FourSAILResult",

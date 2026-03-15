@@ -60,11 +60,36 @@ def test_write_netcdf_dataset_roundtrips_and_sanitises_attrs(tmp_path: Path):
     with xr.open_dataset(output_path) as roundtrip:
         assert np.allclose(roundtrip["foo"].values, dataset["foo"].values)
         assert pd.DatetimeIndex(roundtrip["time"].values).tolist() == pd.DatetimeIndex(dataset["time"].values).tolist()
+        assert roundtrip.attrs["Conventions"] == "CF-1.10"
+        assert roundtrip.attrs["title"] == "SCOPE-RTM dataset"
+        assert roundtrip.attrs["source"].startswith("SCOPE-RTM ")
+        assert "scope.write_netcdf_dataset" in roundtrip.attrs["history"]
+        assert "scope-model.readthedocs.io" in roundtrip.attrs["references"]
         assert roundtrip.attrs["path_attr"] == "/tmp/demo.nc"
         assert roundtrip.attrs["tuple_attr"] == '["alpha", 1]'
         assert roundtrip.attrs["enabled"] == 1
         assert "unused" not in roundtrip.attrs
         assert roundtrip["foo"].attrs["meta"] == '{"source": "unit-test"}'
+        assert roundtrip["time"].attrs["standard_name"] == "time"
+        assert roundtrip["time"].attrs["axis"] == "T"
+
+
+def test_write_netcdf_dataset_appends_to_array_history_attr(tmp_path: Path):
+    dataset = xr.Dataset(
+        {"foo": (("time",), np.array([1.0, 2.0], dtype=np.float64))},
+        coords={"time": pd.date_range("2020-01-01", periods=2, freq="D")},
+        attrs={"history": np.array(["prepared", "validated"])},
+    )
+
+    output_path = write_netcdf_dataset(
+        dataset,
+        tmp_path / "history_roundtrip.nc",
+        options=NetCDFWriteOptions(engine="scipy"),
+    )
+
+    with xr.open_dataset(output_path, engine="scipy") as roundtrip:
+        assert roundtrip.attrs["history"].startswith('["prepared", "validated"]\n')
+        assert "scope.write_netcdf_dataset" in roundtrip.attrs["history"]
 
 
 def test_write_netcdf_dataset_scipy_omits_unlimited_dims_for_runner_style_layout(tmp_path: Path):
@@ -92,3 +117,5 @@ def test_write_netcdf_dataset_scipy_omits_unlimited_dims_for_runner_style_layout
     with xr.open_dataset(output_path, engine="scipy") as roundtrip:
         assert np.allclose(roundtrip["rsot"].values, dataset["rsot"].values)
         assert tuple(roundtrip["rsot"].dims) == ("y", "x", "time", "wavelength")
+        assert roundtrip["x"].attrs["axis"] == "X"
+        assert roundtrip["y"].attrs["axis"] == "Y"
