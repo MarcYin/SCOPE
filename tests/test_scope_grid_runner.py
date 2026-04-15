@@ -2412,3 +2412,93 @@ def test_scope_grid_runner_coupled_workflows_cpu_match_cuda(workflow, atol, rtol
         atol=atol,
         rtol=rtol,
     )
+
+
+# ── Per-pixel ALA / _resolve_lidf tests ────────────────────────────────
+
+
+class TestResolveLifd:
+    """Tests for _resolve_lidf and per-pixel ALA integration."""
+
+    def test_returns_none_without_ala_in_varmap(self):
+        runner, _ = _build_execution_mode_runner()
+        batch: dict[str, torch.Tensor] = {"LAI": torch.tensor([2.0])}
+        varmap: dict[str, str] = {"LAI": "LAI"}
+        assert runner._resolve_lidf(batch, varmap) is None
+
+    def test_returns_none_when_ala_key_missing_from_batch(self):
+        runner, _ = _build_execution_mode_runner()
+        batch: dict[str, torch.Tensor] = {"LAI": torch.tensor([2.0])}
+        varmap: dict[str, str] = {"LAI": "LAI", "ala": "ala"}
+        assert runner._resolve_lidf(batch, varmap) is None
+
+    def test_returns_per_pixel_lidf(self):
+        runner, _ = _build_execution_mode_runner()
+        ala_values = torch.tensor([30.0, 57.0, 70.0], dtype=torch.float64)
+        batch: dict[str, torch.Tensor] = {"ala": ala_values}
+        varmap: dict[str, str] = {"ala": "ala"}
+        lidf = runner._resolve_lidf(batch, varmap)
+        assert lidf is not None
+        n_elements = runner.lidf.shape[-1]
+        assert lidf.shape == (3, n_elements)
+        # Each row should match scalar campbell_lidf
+        for i, a in enumerate(ala_values.tolist()):
+            expected = campbell_lidf(a, n_elements=n_elements, dtype=torch.float64)
+            torch.testing.assert_close(lidf[i], expected, atol=1e-12, rtol=1e-10)
+
+    def test_run_with_per_pixel_ala(self):
+        """Runner should produce outputs when batch data includes per-pixel ala."""
+        runner, spectral = _build_execution_mode_runner()
+        dataset = _build_execution_mode_dataset(spectral)
+        # Add ala variable to dataset
+        dataset["ala"] = (("y", "x", "time"), np.array([[[30.0, 57.0, 70.0]]]))
+        module = _build_execution_mode_module(dataset, chunk_size=3)
+        varmap = {name: name for name in dataset.data_vars}
+        outputs = runner.run(module, varmap=varmap)
+        assert "rsot" in outputs
+        assert outputs["rsot"].shape[0] == 3  # 3 time steps
+
+    def test_uniform_ala_matches_static_lidf(self):
+        """When all pixels have ALA=57, output should match the static lidf(57) run."""
+        runner, spectral = _build_execution_mode_runner()
+
+        # Run without ALA (uses static lidf from campbell_lidf(57))
+        dataset_no_ala = _build_execution_mode_dataset(spectral)
+        module_no_ala = _build_execution_mode_module(dataset_no_ala, chunk_size=3)
+        varmap_no_ala = {name: name for name in dataset_no_ala.data_vars}
+        outputs_no_ala = runner.run(module_no_ala, varmap=varmap_no_ala)
+
+        # Run with ALA=57 for all pixels (should produce same result)
+        dataset_ala = _build_execution_mode_dataset(spectral)
+        dataset_ala["ala"] = (("y", "x", "time"), np.array([[[57.0, 57.0, 57.0]]]))
+        module_ala = _build_execution_mode_module(dataset_ala, chunk_size=3)
+        varmap_ala = {name: name for name in dataset_ala.data_vars}
+        outputs_ala = runner.run(module_ala, varmap=varmap_ala)
+
+        for key in outputs_no_ala:
+            torch.testing.assert_close(
+                outputs_ala[key],
+                outputs_no_ala[key],
+                atol=1e-10,
+                rtol=1e-8,
+                msg=f"Mismatch in {key} for uniform ALA=57 vs static lidf(57)",
+            )
+
+    def test_varying_ala_produces_different_outputs(self):
+        """Different ALA values should produce measurably different reflectance."""
+        runner, spectral = _build_execution_mode_runner()
+        dataset = _build_execution_mode_dataset(spectral)
+        # Override LAI/tts/tto/psi to be uniform so only ALA varies
+        dataset["LAI"] = (("y", "x", "time"), np.array([[[3.0, 3.0, 3.0]]]))
+        dataset["tts"] = (("y", "x", "time"), np.array([[[30.0, 30.0, 30.0]]]))
+        dataset["tto"] = (("y", "x", "time"), np.array([[[15.0, 15.0, 15.0]]]))
+        dataset["psi"] = (("y", "x", "time"), np.array([[[20.0, 20.0, 20.0]]]))
+        dataset["ala"] = (("y", "x", "time"), np.array([[[20.0, 57.0, 80.0]]]))
+        module = _build_execution_mode_module(dataset, chunk_size=3)
+        varmap = {name: name for name in dataset.data_vars}
+        outputs = runner.run(module, varmap=varmap)
+        # rsot for planophile (20°) and erectophile (80°) should differ
+        rsot = outputs["rsot"]
+        assert rsot.shape[0] == 3
+        # The three spectra should not all be identical
+        assert not torch.allclose(rsot[0], rsot[2], atol=1e-6)

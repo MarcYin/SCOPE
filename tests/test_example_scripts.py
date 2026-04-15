@@ -66,6 +66,12 @@ def test_scope_workflow_demo_matches_checked_output(tmp_path: Path) -> None:
     _assert_json_close(actual, expected)
 
 
+def test_per_pixel_ala_demo_matches_checked_output(tmp_path: Path) -> None:
+    actual = _run_example("per_pixel_ala_demo.py", tmp_path / "per_pixel_ala_demo.json")
+    expected = _load_json(REPO_ROOT / "examples" / "output" / "per_pixel_ala_demo.json")
+    _assert_json_close(actual, expected)
+
+
 def test_render_example_visuals_script_bootstraps_src_path() -> None:
     if not SCOPE_ROOT.exists():
         pytest.skip("Upstream SCOPE assets are not available")

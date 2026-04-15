@@ -407,3 +407,94 @@ The script produces:
    for 8 representative distributions
 4. **`leaf_angle_distribution_comparison.json`** --- Machine-readable summary
    of all distributions, parameters, and extinction coefficients
+
+## Per-pixel ALA from Sentinel-2 biophysical retrievals
+
+When using prepared input from archetype-based Sentinel-2 biophysical
+retrievals, the dataset contains a per-pixel **ALA** (Average Leaf Angle)
+variable.  SCOPE Torch now uses this parameter to compute a
+**spatially-varying Campbell LIDF** for each pixel, rather than applying a
+single global leaf angle across the entire scene.
+
+### Data flow
+
+```
+S2 L2A imagery
+  --> SNAP Biophysical Processor / archetype retrieval
+  --> ALA (degrees per pixel)
+  --> prepare.py: dataset["ala"] = post_bio_da.sel(band="ala")
+  --> ScopeGridRunner._resolve_lidf(batch, varmap)
+  --> campbell_lidf(ala_batch, n_elements=18)  # vectorized
+  --> per-pixel LIDF tensor (batch, n_elements)
+  --> FourSAILModel / CanopyReflectanceModel / ...
+```
+
+### How it works
+
+1. **Data preparation** (`scope.io.prepare`): The `ala` band is extracted from
+   the biophysical retrieval product alongside LAI, Cab, etc. and stored as a
+   data variable in the xarray Dataset.
+
+2. **Runner dispatch** (`ScopeGridRunner`): At each batch iteration, the runner
+   calls `_resolve_lidf(batch, varmap)`.  When `"ala"` is present in both the
+   varmap and the batch, a **per-pixel Campbell LIDF** is computed using the
+   vectorized `campbell_lidf()`.  When `"ala"` is absent, the runner falls back
+   to the static LIDF set at construction time (typically 57 deg, approximating
+   a spherical distribution).
+
+3. **Vectorized LIDF** (`campbell_lidf`): The function now accepts both scalar
+   and batched tensor inputs.  A tensor of shape \((B,)\) produces a LIDF of
+   shape \((B, N)\), where \(N\) is the number of inclination bins.  The
+   output is numerically identical to calling the scalar version for each
+   element.
+
+### API usage
+
+```python
+import torch
+from scope import ScopeGridRunner, campbell_lidf
+
+# Static LIDF for construction (fallback when ALA is absent)
+lidf = campbell_lidf(57.0, device=device, dtype=dtype)
+
+runner = ScopeGridRunner.from_scope_assets(
+    lidf=lidf,
+    default_lidfa=57.0,  # documents the intended default
+    scope_root_path="upstream/SCOPE",
+    device=device,
+    dtype=dtype,
+)
+
+# When varmap includes "ala", per-pixel LIDF is computed automatically
+varmap = {name: name for name in dataset.data_vars}  # includes "ala"
+outputs = runner.run_dataset(module, varmap=varmap)
+```
+
+### Per-pixel ALA demo
+
+The example script `examples/per_pixel_ala_demo.py` demonstrates the
+isolated effect of ALA on canopy reflectance.  Five ALA values (20, 35,
+50, 57, 70 deg) are simulated with all other parameters held constant:
+
+| ALA (deg) | Canopy type  | rsot @ 650 nm | rsot @ 865 nm | rsot @ 1600 nm |
+|-----------|--------------|---------------|---------------|----------------|
+| 20        | Planophile   | 0.0368        | 0.5531        | 0.3001         |
+| 35        | Intermediate | 0.0339        | 0.5035        | 0.2735         |
+| 50        | Intermediate | 0.0320        | 0.4462        | 0.2460         |
+| 57        | Spherical    | 0.0317        | 0.4111        | 0.2313         |
+| 70        | Erectophile  | 0.0358        | 0.3230        | 0.2028         |
+
+Key observations:
+
+- **NIR (865 nm)**: Planophile canopies (low ALA) have much higher
+  reflectance (0.55) than erectophile (0.32), because horizontal leaves
+  create more multiple scattering.
+- **Red (650 nm)**: The effect is smaller but still measurable; planophile
+  canopies absorb slightly more due to longer path lengths.
+- **SWIR (1600 nm)**: Follows the NIR pattern at reduced magnitude.
+
+Run the demo:
+
+```bash
+python examples/per_pixel_ala_demo.py --scope-root upstream/SCOPE
+```

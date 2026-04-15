@@ -28,7 +28,7 @@ from ..canopy.fluorescence import (
     CanopyFluorescenceProfileResult,
     CanopyFluorescenceResult,
 )
-from ..canopy.foursail import FourSAILModel
+from ..canopy.foursail import FourSAILModel, campbell_lidf
 from ..canopy.reflectance import (
     CanopyRadiationProfileResult,
     CanopyReflectanceModel,
@@ -66,6 +66,7 @@ class ScopeGridRunner:
         *,
         lidf: torch.Tensor,
         default_hotspot: float = 0.2,
+        default_lidfa: float | None = None,
         soil_spectra: SoilSpectraLibrary | None = None,
         soil_bsm: SoilBSMModel | None = None,
         soil_index_base: int = 1,
@@ -74,6 +75,7 @@ class ScopeGridRunner:
         self.sail = sail
         self.lidf = lidf
         self.default_hotspot = default_hotspot
+        self.default_lidfa = default_lidfa
         self.soil_spectra = soil_spectra
         self.soil_bsm = soil_bsm
         self.soil_index_base = soil_index_base
@@ -104,6 +106,7 @@ class ScopeGridRunner:
         ndub: int = 15,
         doublings_step: int = 5,
         default_hotspot: float = 0.2,
+        default_lidfa: float | None = None,
         soil_index_base: int = 1,
         soil_empirical: SoilEmpiricalParams | None = None,
     ) -> ScopeGridRunner:
@@ -136,6 +139,7 @@ class ScopeGridRunner:
             sail_model,
             lidf=lidf,
             default_hotspot=default_hotspot,
+            default_lidfa=default_lidfa,
             soil_spectra=soil_spectra,
             soil_bsm=soil_bsm,
             soil_index_base=soil_index_base,
@@ -158,6 +162,7 @@ class ScopeGridRunner:
             tto = batch[varmap["tto"]]
             psi = batch[varmap["psi"]]
             soil = self._soil_refl(batch, varmap)
+            lidf = self._resolve_lidf(batch, varmap)
             if hotspot_var and hotspot_var in batch:
                 hotspot = batch[hotspot_var]
             else:
@@ -171,6 +176,7 @@ class ScopeGridRunner:
                 tto,
                 psi,
                 hotspot=hotspot,
+                lidf=lidf,
                 nlayers=self._layer_count(nlayers, etau=None, etah=None, Tcu=None, Tch=None),
             )
             for name in outputs:
@@ -219,6 +225,7 @@ class ScopeGridRunner:
             soil = self._soil_refl(batch, varmap)
             Esun = self._optical_directional_input(batch, varmap, "Esun")
             Esky = self._optical_directional_input(batch, varmap, "Esky")
+            lidf = self._resolve_lidf(batch, varmap)
             if hotspot_var and hotspot_var in batch:
                 hotspot = batch[hotspot_var]
             else:
@@ -234,6 +241,7 @@ class ScopeGridRunner:
                 Esun,
                 Esky,
                 hotspot=hotspot,
+                lidf=lidf,
                 nlayers=self._layer_count(nlayers, etau=None, etah=None, Tcu=None, Tch=None),
             )
             outputs["refl_"].append(result.refl_)
@@ -296,6 +304,7 @@ class ScopeGridRunner:
             soil = self._soil_refl(batch, varmap)
             Esun = self._optical_directional_input(batch, varmap, "Esun")
             Esky = self._optical_directional_input(batch, varmap, "Esky")
+            lidf = self._resolve_lidf(batch, varmap)
             if hotspot_var and hotspot_var in batch:
                 hotspot = batch[hotspot_var]
             else:
@@ -311,6 +320,7 @@ class ScopeGridRunner:
                 Esun,
                 Esky,
                 hotspot=hotspot,
+                lidf=lidf,
                 nlayers=self._layer_count(nlayers, etau=None, etah=None, Tcu=None, Tch=None),
             )
             expected_layer_count = self._accumulate_profile_layer_count(expected_layer_count, result.Ps)
@@ -382,6 +392,7 @@ class ScopeGridRunner:
             Esun = self._spectral_input(batch, varmap, "Esun_")
             Esky = self._spectral_input(batch, varmap, "Esky_")
             soil = self._soil_refl(batch, varmap)
+            lidf = self._resolve_lidf(batch, varmap)
             if hotspot_var and hotspot_var in batch:
                 hotspot = batch[hotspot_var]
             else:
@@ -408,6 +419,7 @@ class ScopeGridRunner:
                 fV=batch[varmap["fV"]] if "fV" in varmap and varmap["fV"] in batch else 1.0,
                 biochem_options=biochem_options,
                 hotspot=hotspot,
+                lidf=lidf,
                 nlayers=self._layer_count(
                     nlayers, etau=None, etah=None, Tcu=batch[varmap["Tcu"]], Tch=batch[varmap["Tch"]]
                 ),
@@ -472,6 +484,7 @@ class ScopeGridRunner:
             Esun_sw = self._spectral_input(batch, varmap, "Esun_sw")
             Esky_sw = self._spectral_input(batch, varmap, "Esky_sw")
             soil_refl = self._soil_refl(batch, varmap)
+            lidf = self._resolve_lidf(batch, varmap)
             if hotspot_var and hotspot_var in batch:
                 hotspot = batch[hotspot_var]
             else:
@@ -534,6 +547,7 @@ class ScopeGridRunner:
                 options=energy_options,
                 biochem_options=biochem_options,
                 hotspot=hotspot,
+                lidf=lidf,
                 nlayers=self._layer_count(
                     nlayers,
                     etau=canopy.fV if isinstance(canopy.fV, torch.Tensor) else None,
@@ -610,6 +624,7 @@ class ScopeGridRunner:
             Esun_sw = self._spectral_input(batch, varmap, "Esun_sw")
             Esky_sw = self._spectral_input(batch, varmap, "Esky_sw")
             soil_refl = self._soil_refl(batch, varmap)
+            lidf = self._resolve_lidf(batch, varmap)
             if hotspot_var and hotspot_var in batch:
                 hotspot = batch[hotspot_var]
             else:
@@ -672,6 +687,7 @@ class ScopeGridRunner:
                 options=energy_options,
                 biochem_options=biochem_options,
                 hotspot=hotspot,
+                lidf=lidf,
                 nlayers=self._layer_count(
                     nlayers,
                     etau=canopy.fV if isinstance(canopy.fV, torch.Tensor) else None,
@@ -733,6 +749,7 @@ class ScopeGridRunner:
             psi = batch[varmap["psi"]]
             excitation = self._excitation(batch, varmap)
             soil = self._soil_refl(batch, varmap)
+            lidf = self._resolve_lidf(batch, varmap)
             if hotspot_var and hotspot_var in batch:
                 hotspot = batch[hotspot_var]
             else:
@@ -747,6 +764,7 @@ class ScopeGridRunner:
                 psi,
                 excitation,
                 hotspot=hotspot,
+                lidf=lidf,
             )
             for name in outputs:
                 outputs[name].append(getattr(result, name))
@@ -794,6 +812,7 @@ class ScopeGridRunner:
             Esky = self._spectral_input(batch, varmap, "Esky_")
             etau = batch[varmap["etau"]] if "etau" in varmap and varmap["etau"] in batch else None
             etah = batch[varmap["etah"]] if "etah" in varmap and varmap["etah"] in batch else None
+            lidf = self._resolve_lidf(batch, varmap)
             if hotspot_var and hotspot_var in batch:
                 hotspot = batch[hotspot_var]
             else:
@@ -811,6 +830,7 @@ class ScopeGridRunner:
                 etau=etau,
                 etah=etah,
                 hotspot=hotspot,
+                lidf=lidf,
                 nlayers=self._layer_count(nlayers, etau=etau, etah=etah, Tcu=None, Tch=None),
             )
             outputs["LoF_"].append(result.LoF_)
@@ -874,6 +894,7 @@ class ScopeGridRunner:
             soil = self._soil_refl(batch, varmap)
             etau = batch[varmap["etau"]] if "etau" in varmap and varmap["etau"] in batch else None
             etah = batch[varmap["etah"]] if "etah" in varmap and varmap["etah"] in batch else None
+            lidf = self._resolve_lidf(batch, varmap)
             if hotspot_var and hotspot_var in batch:
                 hotspot = batch[hotspot_var]
             else:
@@ -891,6 +912,7 @@ class ScopeGridRunner:
                 etau=etau,
                 etah=etah,
                 hotspot=hotspot,
+                lidf=lidf,
                 nlayers=self._layer_count(nlayers, etau=etau, etah=etah, Tcu=None, Tch=None),
             )
             expected_layer_count = self._accumulate_profile_layer_count(expected_layer_count, result.Ps)
@@ -949,6 +971,7 @@ class ScopeGridRunner:
             soil = self._soil_refl(batch, varmap)
             etau = batch[varmap["etau"]] if "etau" in varmap and varmap["etau"] in batch else None
             etah = batch[varmap["etah"]] if "etah" in varmap and varmap["etah"] in batch else None
+            lidf = self._resolve_lidf(batch, varmap)
             if hotspot_var and hotspot_var in batch:
                 hotspot = batch[hotspot_var]
             else:
@@ -966,6 +989,7 @@ class ScopeGridRunner:
                 etau=etau,
                 etah=etah,
                 hotspot=hotspot,
+                lidf=lidf,
                 nlayers=self._layer_count(nlayers, etau=etau, etah=etah, Tcu=None, Tch=None),
             )
             for name in outputs:
@@ -1007,6 +1031,7 @@ class ScopeGridRunner:
             Tch = batch[varmap["Tch"]]
             Tsu = batch[varmap["Tsu"]]
             Tsh = batch[varmap["Tsh"]]
+            lidf = self._resolve_lidf(batch, varmap)
             if hotspot_var and hotspot_var in batch:
                 hotspot = batch[hotspot_var]
             else:
@@ -1034,6 +1059,7 @@ class ScopeGridRunner:
                 Tsh,
                 thermal_optics=thermal_optics,
                 hotspot=hotspot,
+                lidf=lidf,
                 nlayers=self._layer_count(nlayers, etau=None, etah=None, Tcu=Tcu, Tch=Tch),
             )
             for name in outputs:
@@ -1081,6 +1107,7 @@ class ScopeGridRunner:
             Tch = batch[varmap["Tch"]]
             Tsu = batch[varmap["Tsu"]]
             Tsh = batch[varmap["Tsh"]]
+            lidf = self._resolve_lidf(batch, varmap)
             if hotspot_var and hotspot_var in batch:
                 hotspot = batch[hotspot_var]
             else:
@@ -1108,6 +1135,7 @@ class ScopeGridRunner:
                 Tsh,
                 thermal_optics=thermal_optics,
                 hotspot=hotspot,
+                lidf=lidf,
                 nlayers=self._layer_count(nlayers, etau=None, etah=None, Tcu=Tcu, Tch=Tch),
             )
             outputs["Lot_"].append(result.Lot_)
@@ -1167,6 +1195,7 @@ class ScopeGridRunner:
             Tch = batch[varmap["Tch"]]
             Tsu = batch[varmap["Tsu"]]
             Tsh = batch[varmap["Tsh"]]
+            lidf = self._resolve_lidf(batch, varmap)
             if hotspot_var and hotspot_var in batch:
                 hotspot = batch[hotspot_var]
             else:
@@ -1194,6 +1223,7 @@ class ScopeGridRunner:
                 Tsh,
                 thermal_optics=thermal_optics,
                 hotspot=hotspot,
+                lidf=lidf,
                 nlayers=self._layer_count(nlayers, etau=None, etah=None, Tcu=Tcu, Tch=Tch),
             )
             expected_layer_count = self._accumulate_profile_layer_count(expected_layer_count, result.Ps)
@@ -1619,6 +1649,25 @@ class ScopeGridRunner:
             return (f"{name}_dim_1", f"{name}_dim_2")
 
         return tuple(f"{name}_dim_{idx}" for idx in range(1, len(trailing) + 1))
+
+    def _resolve_lidf(self, batch: Mapping[str, torch.Tensor], varmap: Mapping[str, str]) -> torch.Tensor | None:
+        """Return per-pixel LIDF from ALA when available, else ``None`` (use default).
+
+        When the batch contains an ``ala`` variable (Average Leaf Angle from
+        biophysical retrievals), compute a per-pixel Campbell LIDF.  Falls back
+        to the static ``self.lidf`` (via returning *None*) when ALA is absent.
+        """
+        ala_key = varmap.get("ala")
+        if ala_key is None or ala_key not in batch:
+            return None
+        ala = batch[ala_key]
+        n_elements = self.lidf.shape[-1]
+        return campbell_lidf(
+            ala,
+            n_elements=n_elements,
+            device=ala.device,
+            dtype=ala.dtype,
+        )
 
     def _leafbio_kwargs(self, batch: Mapping[str, torch.Tensor], varmap: Mapping[str, str]) -> dict[str, torch.Tensor]:
         kwargs: dict[str, torch.Tensor] = {}

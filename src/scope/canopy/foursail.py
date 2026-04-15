@@ -68,7 +68,11 @@ def scope_lidf(
 
 
 def campbell_lidf(
-    alpha: float, n_elements: int = 18, *, device: torch.device | None = None, dtype: torch.dtype | None = None
+    alpha: float | torch.Tensor,
+    n_elements: int = 18,
+    *,
+    device: torch.device | None = None,
+    dtype: torch.dtype | None = None,
 ) -> torch.Tensor:
     """Compute an ellipsoidal leaf inclination distribution (Campbell, 1990).
 
@@ -76,25 +80,83 @@ def campbell_lidf(
     ----------
     alpha:
         Mean leaf angle in degrees (57 deg approximates a spherical distribution).
+        Can be a scalar or a tensor of shape ``(batch,)`` for per-pixel LIDF.
     n_elements:
         Number of discrete inclination bins spanning 0-90 degrees.
     device, dtype:
         Optional torch placement for the returned tensor.
+
+    Returns
+    -------
+    torch.Tensor
+        Shape ``(n_elements,)`` when *alpha* is scalar, or
+        ``(batch, n_elements)`` when *alpha* is a batched tensor.
     """
 
-    device = device or torch.device("cpu")
+    # Inherit dtype from the input tensor when not explicitly provided
+    if dtype is None and isinstance(alpha, torch.Tensor):
+        dtype = alpha.dtype
     dtype = dtype or torch.float64
-    alpha_tensor = torch.as_tensor(alpha, dtype=dtype, device=device)
-    excent = torch.exp(-1.6184e-5 * alpha_tensor**3 + 2.1145e-3 * alpha_tensor**2 - 1.2390e-1 * alpha_tensor + 3.2491)
+    device = device or torch.device("cpu")
+    alpha_t = torch.as_tensor(alpha, dtype=dtype, device=device)
+    batched = alpha_t.ndim >= 1 and alpha_t.numel() > 1
+    if batched:
+        alpha_t = alpha_t.reshape(-1)  # (batch,)
+    else:
+        alpha_t = alpha_t.reshape(())  # scalar
+
+    excent = torch.exp(-1.6184e-5 * alpha_t**3 + 2.1145e-3 * alpha_t**2 - 1.2390e-1 * alpha_t + 3.2491)
     step = 90.0 / n_elements
-    freq = torch.zeros(n_elements, dtype=dtype, device=device)
-    for idx in range(n_elements):
-        tl1 = torch.deg2rad(torch.tensor(idx * step, dtype=dtype, device=device))
-        tl2 = torch.deg2rad(torch.tensor((idx + 1.0) * step, dtype=dtype, device=device))
+
+    # Pre-compute bin edges: (n_elements,) and (n_elements,)
+    indices = torch.arange(n_elements, dtype=dtype, device=device)
+    tl1 = torch.deg2rad(indices * step)
+    tl2 = torch.deg2rad((indices + 1.0) * step)
+
+    if batched:
+        # excent: (batch,) -> (batch, 1) for broadcasting with (n_elements,)
+        exc = excent.unsqueeze(-1)  # (batch, 1)
+        x1 = exc / torch.sqrt(1.0 + exc**2 * torch.tan(tl1).unsqueeze(0) ** 2)
+        x2 = exc / torch.sqrt(1.0 + exc**2 * torch.tan(tl2).unsqueeze(0) ** 2)
+
+        # Case 1: excent ≈ 1 → spherical
+        freq_sphere = torch.abs(torch.cos(tl1).unsqueeze(0) - torch.cos(tl2).unsqueeze(0)).expand_as(x1)
+
+        # Shared terms for non-spherical cases
+        alph = exc / torch.sqrt(torch.abs(1.0 - exc**2).clamp(min=1e-30))
+        alph2 = alph**2
+        x1_sq, x2_sq = x1**2, x2**2
+
+        # Case 2: excent > 1 (oblate / planophile)
+        alpx1 = torch.sqrt((alph2 + x1_sq).clamp(min=0.0))
+        alpx2 = torch.sqrt((alph2 + x2_sq).clamp(min=0.0))
+        term1_gt = x1 * alpx1 + alph2 * torch.log((x1 + alpx1).clamp(min=1e-30))
+        term2_gt = x2 * alpx2 + alph2 * torch.log((x2 + alpx2).clamp(min=1e-30))
+        freq_gt = torch.abs(term1_gt - term2_gt)
+
+        # Case 3: excent < 1 (prolate / erectophile)
+        almx1 = torch.sqrt((alph2 - x1_sq).clamp(min=0.0))
+        almx2 = torch.sqrt((alph2 - x2_sq).clamp(min=0.0))
+        safe_ratio1 = (x1 / alph.clamp(min=1e-30)).clamp(-1.0, 1.0)
+        safe_ratio2 = (x2 / alph.clamp(min=1e-30)).clamp(-1.0, 1.0)
+        term1_lt = x1 * almx1 + alph2 * torch.arcsin(safe_ratio1)
+        term2_lt = x2 * almx2 + alph2 * torch.arcsin(safe_ratio2)
+        freq_lt = torch.abs(term1_lt - term2_lt)
+
+        # Select per-element based on excent value
+        is_sphere = torch.isclose(exc, torch.ones_like(exc), atol=1e-12)
+        is_gt = exc > 1.0
+        freq = torch.where(is_sphere, freq_sphere, torch.where(is_gt, freq_gt, freq_lt))
+
+        freq_sum = freq.sum(dim=-1, keepdim=True)
+        lidf = torch.where(freq_sum > 0, freq / freq_sum.clamp(min=1e-12), torch.full_like(freq, 1.0 / n_elements))
+        return lidf  # (batch, n_elements)
+    else:
+        # Original scalar path
         x1 = excent / torch.sqrt(1.0 + excent**2 * torch.tan(tl1) ** 2)
         x2 = excent / torch.sqrt(1.0 + excent**2 * torch.tan(tl2) ** 2)
         if torch.isclose(excent, torch.tensor(1.0, dtype=dtype, device=device), atol=1e-12):
-            freq[idx] = torch.abs(torch.cos(tl1) - torch.cos(tl2))
+            freq = torch.abs(torch.cos(tl1) - torch.cos(tl2))
         else:
             alph = excent / torch.sqrt(torch.abs(1.0 - excent**2))
             alph2 = alph**2
@@ -105,16 +167,16 @@ def campbell_lidf(
                 alpx2 = torch.sqrt(alph2 + x2_sq)
                 term1 = x1 * alpx1 + alph2 * torch.log(x1 + alpx1)
                 term2 = x2 * alpx2 + alph2 * torch.log(x2 + alpx2)
-                freq[idx] = torch.abs(term1 - term2)
+                freq = torch.abs(term1 - term2)
             else:
                 almx1 = torch.sqrt(alph2 - x1_sq)
                 almx2 = torch.sqrt(alph2 - x2_sq)
                 term1 = x1 * almx1 + alph2 * torch.arcsin(x1 / alph)
                 term2 = x2 * almx2 + alph2 * torch.arcsin(x2 / alph)
-                freq[idx] = torch.abs(term1 - term2)
-    freq_sum = freq.sum()
-    lidf = torch.where(freq_sum > 0, freq / freq_sum, torch.full_like(freq, 1.0 / n_elements))
-    return lidf
+                freq = torch.abs(term1 - term2)
+        freq_sum = freq.sum()
+        lidf = torch.where(freq_sum > 0, freq / freq_sum, torch.full_like(freq, 1.0 / n_elements))
+        return lidf
 
 
 @dataclass(slots=True)

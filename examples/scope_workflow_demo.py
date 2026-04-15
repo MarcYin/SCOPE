@@ -9,7 +9,7 @@ import pandas as pd
 import torch
 import xarray as xr
 
-from scope import SimulationConfig, ScopeGridRunner, campbell_lidf
+from scope import ScopeGridRunner, SimulationConfig, campbell_lidf
 from scope.data import ScopeGridDataModule
 
 
@@ -17,7 +17,9 @@ def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description="Run the high-level run_scope_dataset(...) workflow with reflectance and fluorescence outputs."
     )
-    parser.add_argument("--scope-root", help="Optional upstream SCOPE root. Defaults to ./upstream/SCOPE when available.")
+    parser.add_argument(
+        "--scope-root", help="Optional upstream SCOPE root. Defaults to ./upstream/SCOPE when available."
+    )
     parser.add_argument("--device", default="cpu", help="Torch device.")
     parser.add_argument("--dtype", choices=("float32", "float64"), default="float64", help="Torch dtype.")
     parser.add_argument("--output", help="Optional JSON output path for the example summary.")
@@ -76,7 +78,9 @@ def summarize(outputs: xr.Dataset) -> dict[str, object]:
         "dims": {name: int(size) for name, size in outputs.sizes.items()},
         "rsot_650nm_t0": float(rsot.sel(wavelength=650.0, method="nearest")),
         "LoF_peak_t0": float(lof.max().item()),
-        "LoF_peak_wavelength_t0": float(lof["fluorescence_wavelength"][int(lof.argmax("fluorescence_wavelength"))].item()),
+        "LoF_peak_wavelength_t0": float(
+            lof["fluorescence_wavelength"][int(lof.argmax("fluorescence_wavelength"))].item()
+        ),
         "directional_refl_shape": [int(size) for size in directional.shape],
         "fluorescence_profile_shape": [int(size) for size in profile.shape],
         "sample_variables": sorted(list(outputs.data_vars))[:12],

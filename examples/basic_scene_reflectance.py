@@ -9,13 +9,15 @@ import pandas as pd
 import torch
 import xarray as xr
 
-from scope import SimulationConfig, ScopeGridRunner, campbell_lidf
+from scope import ScopeGridRunner, SimulationConfig, campbell_lidf
 from scope.data import ScopeGridDataModule
 
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Run a minimal single-scene reflectance example with scope.")
-    parser.add_argument("--scope-root", help="Optional upstream SCOPE root. Defaults to ./upstream/SCOPE when available.")
+    parser.add_argument(
+        "--scope-root", help="Optional upstream SCOPE root. Defaults to ./upstream/SCOPE when available."
+    )
     parser.add_argument("--device", default="cpu", help="Torch device.")
     parser.add_argument("--dtype", choices=("float32", "float64"), default="float64", help="Torch dtype.")
     parser.add_argument("--output", help="Optional JSON output path for the example summary.")

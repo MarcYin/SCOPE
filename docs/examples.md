@@ -63,7 +63,33 @@ Visuals:
 
 ![Layer fluorescence profile](assets/scope_workflow_profile.svg)
 
-## 3. Input Preparation CLI
+## 3. Per-Pixel ALA (Average Leaf Angle)
+
+Script:
+
+- `examples/per_pixel_ala_demo.py`
+
+Run:
+
+```bash
+PYTHONPATH=src python examples/per_pixel_ala_demo.py \
+  --output examples/output/per_pixel_ala_demo.json
+```
+
+Saved output:
+
+- `examples/output/per_pixel_ala_demo.json`
+
+What it demonstrates:
+
+- Per-pixel **Average Leaf Angle (ALA)** from Sentinel-2 biophysical retrievals
+- Vectorized `campbell_lidf()` computing a different LIDF for each pixel
+- `_resolve_lidf()` automatically detecting the `ala` variable in the dataset
+- Isolated effect of canopy architecture (planophile vs. erectophile) on reflectance
+
+The example holds all parameters constant except ALA, which varies from 20 deg (planophile) to 70 deg (erectophile) across 5 simulated pixels.  See [Per-pixel ALA from Sentinel-2](leaf-angle-distribution.md#per-pixel-ala-from-sentinel-2-biophysical-retrievals) for the full theory and data flow.
+
+## 4. Input Preparation CLI
 
 Command:
 
@@ -80,7 +106,7 @@ python prepare_scope_input.py --help
 
 This is the intended entry point for building runner-ready `xarray` datasets from weather, observation, and Sentinel-2 bio inputs.
 
-## 4. Lightweight Inference API
+## 5. Lightweight Inference API
 
 For repeated tensor-only inference without the `xarray` runner surface:
 
@@ -113,7 +139,7 @@ This surface is intended for production services that want:
 - no `xarray` orchestration overhead
 - only the requested outputs
 
-## 5. What to Copy Into Real Applications
+## 6. What to Copy Into Real Applications
 
 For application code, the most stable pattern is:
 
@@ -125,7 +151,7 @@ For application code, the most stable pattern is:
 
 Use the example scripts as working templates rather than writing directly against low-level kernels unless you need custom research behavior.
 
-## 6. Shell Workflow
+## 7. Shell Workflow
 
 For an installed shell workflow rather than Python example code:
 

@@ -128,6 +128,7 @@ def _build_runner(args: argparse.Namespace, dataset: xr.Dataset) -> ScopeGridRun
         device=device,
         dtype=dtype,
         default_hotspot=args.default_hotspot,
+        default_lidfa=args.lidfa,
     )
 
 

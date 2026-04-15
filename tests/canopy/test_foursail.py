@@ -1,6 +1,7 @@
 import math
 
 import numpy as np
+import pytest
 import torch
 from prosail.FourSAIL import foursail as foursail_np
 
@@ -118,3 +119,67 @@ def test_hotspot_terms_match_scalar_reference():
     )
     assert np.allclose(tsstoo.numpy(), expected[:, 0], atol=1e-12, rtol=1e-10)
     assert np.allclose(sumint.numpy(), expected[:, 1], atol=1e-12, rtol=1e-10)
+
+
+# ── vectorized campbell_lidf tests ──────────────────────────────────────
+
+
+class TestCampbellLidfVectorized:
+    """Tests for the batched/vectorized campbell_lidf path."""
+
+    def test_scalar_vs_batch_equivalence(self):
+        """Each row of a batched call must match the corresponding scalar call."""
+        alphas = [10.0, 30.0, 57.0, 70.0, 85.0]
+        batch = campbell_lidf(torch.tensor(alphas, dtype=torch.float64))
+        for i, a in enumerate(alphas):
+            scalar = campbell_lidf(a, dtype=torch.float64)
+            torch.testing.assert_close(batch[i], scalar, atol=1e-12, rtol=1e-10)
+
+    def test_batch_shape(self):
+        result = campbell_lidf(torch.tensor([10.0, 20.0, 30.0]))
+        assert result.shape == (3, 18)
+
+    def test_scalar_shape(self):
+        result = campbell_lidf(57.0)
+        assert result.shape == (18,)
+
+    def test_single_element_tensor_returns_1d(self):
+        result = campbell_lidf(torch.tensor(57.0))
+        assert result.shape == (18,)
+
+    def test_custom_n_elements(self):
+        result_scalar = campbell_lidf(57.0, n_elements=13)
+        assert result_scalar.shape == (13,)
+        result_batch = campbell_lidf(torch.tensor([30.0, 57.0]), n_elements=13)
+        assert result_batch.shape == (2, 13)
+
+    @pytest.mark.parametrize("alpha", [0.1, 10.0, 30.0, 57.0, 70.0, 89.9])
+    def test_valid_distribution(self, alpha):
+        """Output must be a valid probability distribution (sums to 1, all >= 0)."""
+        lidf = campbell_lidf(alpha, dtype=torch.float64)
+        assert (lidf >= 0).all()
+        torch.testing.assert_close(lidf.sum(), torch.tensor(1.0, dtype=torch.float64), atol=1e-10, rtol=0)
+
+    def test_batch_valid_distribution(self):
+        alphas = torch.tensor([0.1, 30.0, 57.0, 89.9], dtype=torch.float64)
+        lidf = campbell_lidf(alphas)
+        assert (lidf >= 0).all()
+        sums = lidf.sum(dim=-1)
+        torch.testing.assert_close(sums, torch.ones(4, dtype=torch.float64), atol=1e-10, rtol=0)
+
+    def test_planophile_weight_in_low_angles(self):
+        """alpha near 0 should concentrate weight in the first (low-angle) bins."""
+        lidf = campbell_lidf(5.0, dtype=torch.float64)
+        assert lidf[:3].sum() > lidf[-3:].sum()
+
+    def test_erectophile_weight_in_high_angles(self):
+        """alpha near 90 should concentrate weight in the last (high-angle) bins."""
+        lidf = campbell_lidf(85.0, dtype=torch.float64)
+        assert lidf[-3:].sum() > lidf[:3].sum()
+
+    @pytest.mark.parametrize("dt", [torch.float32, torch.float64])
+    def test_dtype_preserved(self, dt):
+        lidf = campbell_lidf(57.0, dtype=dt)
+        assert lidf.dtype == dt
+        lidf_b = campbell_lidf(torch.tensor([57.0], dtype=dt))
+        assert lidf_b.dtype == dt
