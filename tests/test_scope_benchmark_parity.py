@@ -118,3 +118,34 @@ def test_scope_benchmark_locked_subsystems(tmp_path):
         "ustar",
     ):
         assert energy[name]["max_rel"] < 5e-3
+
+    scope_workflow = report["scope_workflow"]
+    for name in ("rso", "rsd", "rdd", "rdo", "refl"):
+        assert scope_workflow[name]["max_rel"] < 1e-9
+    for name in (
+        "LoF_",
+        "EoutF_",
+        "Femleaves_",
+        "LoF_sunlit",
+        "LoF_shaded",
+        "LoF_scattered",
+        "LoF_soil",
+        "Fmin_",
+        "Fplu_",
+    ):
+        assert scope_workflow[name]["max_rel"] < 1e-4
+    for name in ("EoutFrc_", "sigmaF"):
+        assert scope_workflow[name]["max_rel"] < 5e-5
+    for name in ("Lot_", "Eoutte_", "Loutt", "Eoutt"):
+        assert scope_workflow[name]["max_rel"] < 1e-5
+    for name in ("sunlit_eta", "shaded_eta", "sunlit_Ci", "shaded_Ci", "sunlit_rcw", "shaded_rcw"):
+        assert scope_workflow[name]["max_rel"] < 1e-3
+    assert scope_workflow["sunlit_A"]["max_rel"] < 1e-3
+    assert scope_workflow["shaded_A"]["max_abs"] < 1e-3
+    assert scope_workflow["Tcu"]["max_abs"] < 2e-2
+    assert scope_workflow["Tch"]["max_abs"] < 1e-2
+    assert scope_workflow["Tsu"]["max_abs"] < 5e-2
+    assert scope_workflow["Tsh"]["max_abs"] < 5e-3
+    for name in ("Rntot", "lEtot", "Htot"):
+        assert scope_workflow[name]["max_rel"] < 5e-3
+    assert scope_workflow["counter"]["max_abs"] == 0.0

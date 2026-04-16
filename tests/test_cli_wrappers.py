@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import argparse
 import os
 import subprocess
 import sys
@@ -10,6 +11,7 @@ import pandas as pd
 import pytest
 import xarray as xr
 
+from scope.cli import run as run_cli
 from scope.variables import render_variable_markdown
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
@@ -224,3 +226,37 @@ def test_scope_module_run_cli_executes_minimal_reflectance_workflow(tmp_path: Pa
         assert "rsot" in outputs
         assert outputs["rsot"].sizes["wavelength"] > 100
     assert summary_path.exists()
+
+
+def test_scope_run_workflow_forwards_soil_heat_method_into_scope_options() -> None:
+    class _RunnerProbe:
+        def __init__(self) -> None:
+            self.kwargs: dict[str, object] | None = None
+
+        def run_scope_dataset(self, data_module: object, **kwargs: object) -> xr.Dataset:
+            self.kwargs = kwargs
+            return xr.Dataset()
+
+    runner = _RunnerProbe()
+    dataset = xr.Dataset(
+        {
+            "Cab": (("y", "x", "time"), np.array([[[45.0]]])),
+        },
+        coords={"y": [0], "x": [0], "time": pd.date_range("2020-07-01T12:00:00", periods=1, freq="h")},
+    )
+    data_module = type("_DataModuleProbe", (), {"dataset": dataset})()
+    args = argparse.Namespace(
+        workflow="scope",
+        calc_ebal=1,
+        calc_fluor=None,
+        calc_planck=None,
+        calc_directional=None,
+        calc_vert_profiles=None,
+        soil_heat_method=4,
+        nlayers=None,
+    )
+
+    run_cli._run_workflow(args, runner, data_module)
+
+    assert runner.kwargs is not None
+    assert runner.kwargs["scope_options"] == {"calc_ebal": 1, "soil_heat_method": 4}

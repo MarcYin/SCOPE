@@ -130,6 +130,8 @@ Outputs:
 - `Eplut_`
 - `LotBB_`
 
+This path consumes explicit thermal state inputs. If you want the Python runner to reproduce the coupled `calc_ebal` solve instead, set `calc_ebal=1` on the high-level `scope` workflow or call one of the `energy-balance*` runners directly.
+
 ### Coupled energy-balance workflows
 
 Additional meteorology / canopy / soil fields are required, typically including:
@@ -140,6 +142,9 @@ Additional meteorology / canopy / soil fields are required, typically including:
 - shortwave forcing on `wavelength`:
   - `Esun_sw`
   - `Esky_sw`
+- optional longwave forcing on `thermal_wavelength`:
+  - `Esun_lw`
+  - `Esky_lw`
 
 These workflows produce:
 
@@ -153,6 +158,7 @@ These workflows produce:
 
 `run_scope_dataset(...)` currently honors these dataset attrs or explicit `scope_options`:
 
+- `calc_ebal`
 - `calc_fluor`
 - `calc_planck`
 - `calc_directional`
@@ -162,6 +168,7 @@ Recommended usage:
 
 - keep the prepared dataset attrs as the default workflow intent
 - use explicit `scope_options=...` only when you need to override them at runtime
+- when `calc_ebal=1`, `calc_fluor` and `calc_planck` dispatch to the coupled energy-balance fluorescence / thermal paths rather than the standalone `Esun_/Esky_` or `Tcu/Tch/Tsu/Tsh` inputs
 
 ## Output Naming Conventions
 

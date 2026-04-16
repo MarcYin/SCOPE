@@ -51,6 +51,7 @@ DEFAULT_OBSERVATION_VAR_MAP = {
 }
 DEFAULT_SCOPE_OPTIONS = {
     "lite": 1,
+    "calc_ebal": 0,
     "calc_fluor": 1,
     "calc_planck": 0,
     "calc_xanthophyllabs": 0,

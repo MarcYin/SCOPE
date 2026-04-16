@@ -9,6 +9,7 @@ from ..variables import get_variable_definition
 _BASE_REFLECTANCE_REQUIRED = ("Cab", "Cw", "Cdm", "LAI", "tts", "tto", "psi")
 _SOIL_GROUPS = (("soil_refl",), ("soil_spectrum",), ("BSMBrightness", "BSMlat", "BSMlon", "SMC"))
 _FLUORESCENCE_REQUIRED = _BASE_REFLECTANCE_REQUIRED + ("fqe", "Esun_", "Esky_")
+_COUPLED_FLUORESCENCE_REQUIRED = ("fqe",)
 _THERMAL_REQUIRED = ("LAI", "tts", "tto", "psi", "Tcu", "Tch", "Tsu", "Tsh")
 _ENERGY_REQUIRED = (
     *_BASE_REFLECTANCE_REQUIRED,
@@ -44,18 +45,25 @@ def validate_scope_dataset(
     required = set(_BASE_REFLECTANCE_REQUIRED)
     require_soil = workflow not in {"thermal", "directional-thermal", "thermal-profiles"}
     directional = workflow in {"directional-reflectance", "directional-fluorescence", "directional-thermal"}
+    needs_longwave_dims = False
 
     if workflow == "scope":
         options = {
             key: dataset.attrs.get(key)
-            for key in ("calc_fluor", "calc_planck", "calc_directional", "calc_vert_profiles")
+            for key in ("calc_fluor", "calc_planck", "calc_directional", "calc_vert_profiles", "calc_ebal")
         }
         if scope_options:
             options.update(scope_options)
-        if _as_bool(options.get("calc_fluor"), default=False):
-            required.update(_FLUORESCENCE_REQUIRED)
-        if _as_bool(options.get("calc_planck"), default=False):
-            required.update(_THERMAL_REQUIRED)
+        if _as_bool(options.get("calc_ebal"), default=False):
+            required.update(_ENERGY_REQUIRED)
+            needs_longwave_dims = True
+            if _as_bool(options.get("calc_fluor"), default=False):
+                required.update(_COUPLED_FLUORESCENCE_REQUIRED)
+        else:
+            if _as_bool(options.get("calc_fluor"), default=False):
+                required.update(_FLUORESCENCE_REQUIRED)
+            if _as_bool(options.get("calc_planck"), default=False):
+                required.update(_THERMAL_REQUIRED)
         if _as_bool(options.get("calc_directional"), default=False):
             directional = True
     elif workflow in {"reflectance", "directional-reflectance", "reflectance-profiles"}:
@@ -64,11 +72,19 @@ def validate_scope_dataset(
         required.update(_FLUORESCENCE_REQUIRED)
     elif workflow in {"thermal", "directional-thermal", "thermal-profiles"}:
         required = set(_THERMAL_REQUIRED)
-    elif workflow in {"biochemical-fluorescence", "energy-balance-fluorescence"}:
+    elif workflow == "energy-balance":
+        required.update(_ENERGY_REQUIRED)
+        needs_longwave_dims = True
+    elif workflow == "biochemical-fluorescence":
         required.update(_ENERGY_REQUIRED)
         required.update(_FLUORESCENCE_REQUIRED)
+    elif workflow == "energy-balance-fluorescence":
+        required.update(_ENERGY_REQUIRED)
+        required.update(_COUPLED_FLUORESCENCE_REQUIRED)
+        needs_longwave_dims = True
     elif workflow == "energy-balance-thermal":
         required.update(_ENERGY_REQUIRED)
+        needs_longwave_dims = True
     else:
         raise ValueError(f"Unsupported workflow '{workflow}'")
 
@@ -88,6 +104,10 @@ def validate_scope_dataset(
     for name in ("Esun_sw", "Esky_sw", "soil_refl"):
         if name in dataset and "wavelength" not in dataset[name].dims:
             errors.append(f"{name} must include the 'wavelength' dimension.")
+    if needs_longwave_dims:
+        for name in ("Esun_lw", "Esky_lw"):
+            if name in dataset and "thermal_wavelength" not in dataset[name].dims:
+                errors.append(f"{name} must include the 'thermal_wavelength' dimension.")
     for name in ("etau", "etah", "fV"):
         if name in dataset and "layer" not in dataset[name].dims:
             errors.append(f"{name} must include the 'layer' dimension.")

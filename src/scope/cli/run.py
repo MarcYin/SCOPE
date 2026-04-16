@@ -27,6 +27,7 @@ _WORKFLOW_RUNNERS: Mapping[str, str] = {
     "directional-thermal": "run_directional_thermal_dataset",
     "thermal-profiles": "run_thermal_profiles_dataset",
     "biochemical-fluorescence": "run_biochemical_fluorescence_dataset",
+    "energy-balance": "run_energy_balance_dataset",
     "energy-balance-fluorescence": "run_energy_balance_fluorescence_dataset",
     "energy-balance-thermal": "run_energy_balance_thermal_dataset",
 }
@@ -58,8 +59,11 @@ def build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument("--nlayers", type=int, help="Optional layer count override for layered workflows.")
     parser.add_argument(
-        "--soil-heat-method", type=int, default=2, help="Soil heat method for coupled energy-balance workflows."
+        "--soil-heat-method",
+        type=int,
+        help="Optional soil heat method override for coupled energy-balance workflows. Defaults to the dataset setting or 2.",
     )
+    parser.add_argument("--calc-ebal", choices=(0, 1), type=int, help="Override calc_ebal for workflow='scope'.")
     parser.add_argument("--calc-fluor", choices=(0, 1), type=int, help="Override calc_fluor for workflow='scope'.")
     parser.add_argument("--calc-planck", choices=(0, 1), type=int, help="Override calc_planck for workflow='scope'.")
     parser.add_argument(
@@ -156,10 +160,12 @@ def _run_workflow(args: argparse.Namespace, runner: ScopeGridRunner, data_module
         scope_options = {
             key: value
             for key, value in {
+                "calc_ebal": args.calc_ebal,
                 "calc_fluor": args.calc_fluor,
                 "calc_planck": args.calc_planck,
                 "calc_directional": args.calc_directional,
                 "calc_vert_profiles": args.calc_vert_profiles,
+                "soil_heat_method": args.soil_heat_method,
             }.items()
             if value is not None
         }
@@ -179,13 +185,17 @@ def _run_workflow(args: argparse.Namespace, runner: ScopeGridRunner, data_module
             "directional-thermal",
             "thermal-profiles",
             "biochemical-fluorescence",
+            "energy-balance",
             "energy-balance-fluorescence",
             "energy-balance-thermal",
         }
         and args.nlayers is not None
     ):
         kwargs["nlayers"] = args.nlayers
-    if workflow in {"energy-balance-fluorescence", "energy-balance-thermal"}:
+    if (
+        workflow in {"energy-balance", "energy-balance-fluorescence", "energy-balance-thermal"}
+        and args.soil_heat_method is not None
+    ):
         kwargs["soil_heat_method"] = args.soil_heat_method
 
     return method(data_module, **kwargs)
@@ -195,6 +205,7 @@ def _validate_input_dataset(args: argparse.Namespace, dataset: xr.Dataset) -> No
     scope_options = {
         key: value
         for key, value in {
+            "calc_ebal": args.calc_ebal,
             "calc_fluor": args.calc_fluor,
             "calc_planck": args.calc_planck,
             "calc_directional": args.calc_directional,

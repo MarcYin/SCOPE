@@ -50,8 +50,9 @@ The physical meanings are aligned to the current Python implementation and, wher
 
 | Name | Units | Meaning | Relationship / formula | Source | Workflows / aliases |
 | --- | --- | --- | --- | --- | --- |
-| `calc_fluor` | 0/1 | Enables fluorescence workflows in high-level runner dispatch. | - | docs/input-output-reference.md | options.calc_fluor |
-| `calc_planck` | 0/1 | Enables thermal/Planck workflows in high-level runner dispatch. | - | docs/input-output-reference.md | - |
+| `calc_ebal` | 0/1 | Requests coupled energy-balance closure in high-level runner dispatch. | - | docs/input-output-reference.md | options.calc_ebal |
+| `calc_fluor` | 0/1 | Enables fluorescence workflows in high-level runner dispatch. When calc_ebal is true, this uses the coupled energy-balance fluorescence path. | - | docs/input-output-reference.md | options.calc_fluor |
+| `calc_planck` | 0/1 | Enables thermal/Planck workflows in high-level runner dispatch. When calc_ebal is true, this uses the coupled energy-balance thermal path. | - | docs/input-output-reference.md | - |
 | `calc_directional` | 0/1 | Requests directional products for the selected workflows. | - | docs/input-output-reference.md | - |
 | `calc_vert_profiles` | 0/1 | Requests vertical-profile products for the selected workflows. | - | docs/input-output-reference.md | - |
 | `soil_heat_method` | index | Selects the soil heat-flux treatment in coupled energy-balance workflows. | - | docs/input-output-reference.md | - |
@@ -122,6 +123,8 @@ The physical meanings are aligned to the current Python implementation and, wher
 | `Esky_` | W m-2 um-1 | Diffuse excitation irradiance spectrum for fluorescence. | - | docs/input-output-reference.md | - |
 | `Esun_sw` | W m-2 um-1 | Direct shortwave irradiance spectrum used by reflectance and energy-balance workflows. | - | docs/input-output-reference.md | - |
 | `Esky_sw` | W m-2 um-1 | Diffuse shortwave irradiance spectrum used by reflectance and energy-balance workflows. | - | docs/input-output-reference.md | - |
+| `Esun_lw` | W m-2 um-1 | Direct longwave irradiance spectrum used by coupled energy-balance workflows. | - | docs/input-output-reference.md | - |
+| `Esky_lw` | W m-2 um-1 | Diffuse longwave irradiance spectrum used by coupled energy-balance workflows. | - | docs/input-output-reference.md | - |
 
 ### Fluorescence Transport
 

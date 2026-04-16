@@ -252,6 +252,6 @@ Because of that mix, the package does not enable compiled execution by default.
 ## Release Workflows
 
 - `.github/workflows/release.yml`
-  Builds `sdist` and wheel artifacts for `SCOPE-RTM`, validates them with `twine check`, and auto-publishes to PyPI on version tags. Manual dispatch still supports TestPyPI or PyPI.
+  Verifies tag/version alignment, reruns the release-local CPU/docs gates, builds `sdist` and wheel artifacts for `SCOPE-RTM`, validates them with `twine check`, smoke-installs both artifact types through the documented `scope` CLI surface, and then publishes to PyPI on version tags. Manual dispatch still supports TestPyPI or PyPI.
 - `.github/workflows/docs.yml`
   Builds the MkDocs site and deploys it to GitHub Pages.

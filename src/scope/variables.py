@@ -140,11 +140,22 @@ VARIABLES: tuple[VariableDefinition, ...] = (
         aliases=("psi grid",),
     ),
     _v(
+        "calc_ebal",
+        kind="option",
+        category="workflow",
+        units="0/1",
+        meaning="Requests coupled energy-balance closure in high-level runner dispatch.",
+        aliases=("options.calc_ebal",),
+    ),
+    _v(
         "calc_fluor",
         kind="option",
         category="workflow",
         units="0/1",
-        meaning="Enables fluorescence workflows in high-level runner dispatch.",
+        meaning=(
+            "Enables fluorescence workflows in high-level runner dispatch. "
+            "When calc_ebal is true, this uses the coupled energy-balance fluorescence path."
+        ),
         aliases=("options.calc_fluor",),
     ),
     _v(
@@ -152,7 +163,10 @@ VARIABLES: tuple[VariableDefinition, ...] = (
         kind="option",
         category="workflow",
         units="0/1",
-        meaning="Enables thermal/Planck workflows in high-level runner dispatch.",
+        meaning=(
+            "Enables thermal/Planck workflows in high-level runner dispatch. "
+            "When calc_ebal is true, this uses the coupled energy-balance thermal path."
+        ),
     ),
     _v(
         "calc_directional",
@@ -350,6 +364,20 @@ VARIABLES: tuple[VariableDefinition, ...] = (
         category="spectral forcing",
         units="W m-2 um-1",
         meaning="Diffuse shortwave irradiance spectrum used by reflectance and energy-balance workflows.",
+    ),
+    _v(
+        "Esun_lw",
+        kind="input",
+        category="spectral forcing",
+        units="W m-2 um-1",
+        meaning="Direct longwave irradiance spectrum used by coupled energy-balance workflows.",
+    ),
+    _v(
+        "Esky_lw",
+        kind="input",
+        category="spectral forcing",
+        units="W m-2 um-1",
+        meaning="Diffuse longwave irradiance spectrum used by coupled energy-balance workflows.",
     ),
     _v(
         "etau",

@@ -7,7 +7,7 @@ name = "SCOPE-RTM"
 version = "0.2.0"
 description = "PyTorch reimplementation of the SCOPE radiative transfer model."
 readme = "README.md"
-authors = [{name = "Marc Yin", email = "marc.yin@example.com"}]
+authors = [{name = "Marc Yin"}]
 license = "GPL-3.0-only"
 requires-python = ">=3.10"
 keywords = ["scope", "radiative-transfer", "remote-sensing", "pytorch", "fluorescence", "thermal"]
@@ -35,6 +35,10 @@ dependencies = [
 ]
 
 [project.urls]
+"Homepage" = "https://github.com/MarcYin/SCOPE"
+"Repository" = "https://github.com/MarcYin/SCOPE"
+"Issues" = "https://github.com/MarcYin/SCOPE/issues"
+"Changelog" = "https://github.com/MarcYin/SCOPE/blob/main/CHANGELOG.md"
 "Original MATLAB SCOPE" = "https://github.com/Christiaanvandertol/SCOPE"
 "Original SCOPE Manual" = "https://scope-model.readthedocs.io/en/master/"
 
@@ -60,8 +64,8 @@ docs = [
     "mkdocs-mermaid2-plugin>=1.2"
 ]
 release = [
-    "build>=1.2",
-    "twine>=5.1"
+    "build>=1.2,<2",
+    "twine>=5.1,<6"
 ]
 
 [tool.setuptools]

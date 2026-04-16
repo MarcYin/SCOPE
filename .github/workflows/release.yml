@@ -20,9 +20,109 @@ concurrency:
   group: release-${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: false
 
+env:
+  UPSTREAM_SCOPE_COMMIT: e4c2e5109a309e6d2636fd6aa33e0e54b6dd88de
+
 jobs:
+  verify-release-ref:
+    name: Verify release ref
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+
+      - name: Verify tag matches project.version
+        env:
+          GITHUB_REF_NAME: ${{ github.ref_name }}
+        run: |
+          if [[ "${GITHUB_REF}" != refs/tags/v* ]]; then
+            echo "Manual dispatch; skipping tag/version verification."
+            exit 0
+          fi
+          python - <<'PY'
+          import os
+          import pathlib
+          import tomllib
+
+          pyproject = pathlib.Path("pyproject.toml")
+          version = tomllib.loads(pyproject.read_text(encoding="utf-8"))["project"]["version"]
+          tag = os.environ["GITHUB_REF_NAME"]
+          expected = f"v{version}"
+          if tag != expected:
+              raise SystemExit(f"Tag {tag} does not match project.version {version} (expected {expected})")
+          print(f"Verified release tag {tag} matches project.version {version}")
+          PY
+
+  unit-cpu-release:
+    name: Release CPU suite (Python ${{ matrix.python-version }})
+    needs: verify-release-ref
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ["3.10", "3.11", "3.12", "3.13"]
+    permissions:
+      contents: read
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Fetch pinned upstream SCOPE assets
+        run: |
+          if [ ! -d upstream/SCOPE ]; then
+            git clone https://github.com/Christiaanvandertol/SCOPE.git upstream/SCOPE
+          fi
+          git -C upstream/SCOPE fetch --depth 1 origin "$UPSTREAM_SCOPE_COMMIT"
+          git -C upstream/SCOPE checkout "$UPSTREAM_SCOPE_COMMIT"
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+          cache: pip
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -e ".[dev]"
+
+      - name: Run test suite
+        run: PYTHONPATH=src python -m pytest -q
+
+  docs-build-release:
+    name: Release docs build
+    needs: verify-release-ref
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+          cache: pip
+
+      - name: Install docs dependencies
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -e ".[docs]"
+
+      - name: Build documentation
+        run: mkdocs build --strict
+
   build-dist:
     name: Build distribution artifacts
+    needs: [verify-release-ref, unit-cpu-release, docs-build-release]
     runs-on: ubuntu-latest
     permissions:
       contents: read
@@ -55,14 +155,26 @@ jobs:
           if-no-files-found: error
 
   smoke-install:
-    name: Smoke-install built wheel
+    name: Smoke-install built ${{ matrix.artifact-type }}
     needs: build-dist
     runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        artifact-type: ["wheel", "sdist"]
     permissions:
       contents: read
     steps:
       - name: Check out repository
         uses: actions/checkout@v4
+
+      - name: Fetch pinned upstream SCOPE assets
+        run: |
+          if [ ! -d upstream/SCOPE ]; then
+            git clone https://github.com/Christiaanvandertol/SCOPE.git upstream/SCOPE
+          fi
+          git -C upstream/SCOPE fetch --depth 1 origin "$UPSTREAM_SCOPE_COMMIT"
+          git -C upstream/SCOPE checkout "$UPSTREAM_SCOPE_COMMIT"
 
       - name: Set up Python
         uses: actions/setup-python@v5
@@ -76,19 +188,81 @@ jobs:
           name: python-dist
           path: dist
 
-      - name: Install wheel
+      - name: Install artifact
         run: |
           python -m pip install --upgrade pip
-          python -m pip install dist/*.whl
+          if [ "${{ matrix.artifact-type }}" = "wheel" ]; then
+            python -m pip install dist/*.whl
+          else
+            python -m pip install dist/*.tar.gz
+          fi
 
-      - name: Verify import and CLI
+      - name: Verify import and installed CLI
+        env:
+          SCOPE_SMOKE_ROOT: ${{ github.workspace }}/upstream/SCOPE
         run: |
           python -c "import scope; import importlib.metadata as md; assert scope.__version__ == md.version('SCOPE-RTM'); print(scope.__version__)"
+          python -m scope --help
           scope --help
-          scope-fetch-upstream --help
-          scope-prepare --help
-          scope-run --help
+          scope fetch-upstream --help
+          scope prepare --help
+          scope run --help
           scope vars Cab
+
+          tmpdir="$(mktemp -d)"
+          export SCOPE_SMOKE_INPUT="$tmpdir/scope_inputs.nc"
+          export SCOPE_SMOKE_OUTPUT="$tmpdir/scope_outputs.nc"
+          export SCOPE_SMOKE_SUMMARY="$tmpdir/scope_summary.json"
+
+          python - <<'PY'
+          import os
+
+          import numpy as np
+          import pandas as pd
+          import xarray as xr
+
+          dataset = xr.Dataset(
+              {
+                  "Cab": (("y", "x", "time"), np.array([[[45.0]]])),
+                  "Cw": (("y", "x", "time"), np.array([[[0.010]]])),
+                  "Cdm": (("y", "x", "time"), np.array([[[0.012]]])),
+                  "LAI": (("y", "x", "time"), np.array([[[2.2]]])),
+                  "tts": (("y", "x", "time"), np.array([[[30.0]]])),
+                  "tto": (("y", "x", "time"), np.array([[[20.0]]])),
+                  "psi": (("y", "x", "time"), np.array([[[15.0]]])),
+                  "soil_spectrum": (("y", "x", "time"), np.array([[[1.0]]])),
+              },
+              coords={"y": [0.0], "x": [0.0], "time": pd.date_range("2020-07-01T12:00:00", periods=1, freq="h")},
+              attrs={"example": "release_smoke"},
+          )
+          dataset.to_netcdf(os.environ["SCOPE_SMOKE_INPUT"], engine="scipy")
+          PY
+
+          scope run \
+            --input "$SCOPE_SMOKE_INPUT" \
+            --output "$SCOPE_SMOKE_OUTPUT" \
+            --summary-json "$SCOPE_SMOKE_SUMMARY" \
+            --scope-root "$SCOPE_SMOKE_ROOT" \
+            --workflow reflectance \
+            --dtype float64 \
+            --chunk-size 1 \
+            --netcdf-engine scipy \
+            --no-compression
+
+          python - <<'PY'
+          import json
+          import os
+
+          import xarray as xr
+
+          with xr.open_dataset(os.environ["SCOPE_SMOKE_OUTPUT"], engine="scipy") as dataset:
+              assert dataset.attrs["scope_product"] == "reflectance"
+              assert "rsot" in dataset
+
+          with open(os.environ["SCOPE_SMOKE_SUMMARY"], encoding="utf-8") as handle:
+              summary = json.load(handle)
+          assert summary["product"] == "reflectance"
+          PY
 
   github-release:
     name: Create GitHub release
@@ -104,12 +278,13 @@ jobs:
           name: python-dist
           path: dist
 
-      - name: Create or update GitHub release
+      - name: Create or publish GitHub release
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
           if gh release view "${GITHUB_REF_NAME}" >/dev/null 2>&1; then
             gh release upload "${GITHUB_REF_NAME}" dist/* --clobber
+            gh release edit "${GITHUB_REF_NAME}" --draft=false --latest
           else
             gh release create "${GITHUB_REF_NAME}" dist/* \
               --title "${GITHUB_REF_NAME}" \
