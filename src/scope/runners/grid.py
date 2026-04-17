@@ -3,6 +3,7 @@ from __future__ import annotations
 import logging
 from collections import Counter
 from collections.abc import Mapping, Sequence
+from dataclasses import dataclass
 
 import torch
 import xarray as xr
@@ -54,6 +55,30 @@ from ..spectral.fluspect import FluspectModel, LeafBioBatch
 from ..spectral.loaders import SoilSpectraLibrary, load_fluspect_resources, load_soil_spectra
 from ..spectral.soil import SoilBSMModel, SoilEmpiricalParams
 from ..variables import annotate_dataset
+
+
+@dataclass(slots=True)
+class _EnergyBatchInputs:
+    leafbio: LeafBioBatch
+    biochem: LeafBiochemistryInputs
+    lai: torch.Tensor
+    tts: torch.Tensor
+    tto: torch.Tensor
+    psi: torch.Tensor
+    Esun_sw: torch.Tensor
+    Esky_sw: torch.Tensor
+    Esun_lw: torch.Tensor | None
+    Esky_lw: torch.Tensor | None
+    soil_refl: torch.Tensor
+    hotspot: torch.Tensor
+    meteo: EnergyBalanceMeteo
+    canopy: EnergyBalanceCanopy
+    soil: EnergyBalanceSoil
+    nlayers: int | None
+    Tcu0: torch.Tensor | None
+    Tch0: torch.Tensor | None
+    Tsu0: torch.Tensor | None
+    Tsh0: torch.Tensor | None
 
 
 class ScopeGridRunner:
@@ -440,6 +465,223 @@ class ScopeGridRunner:
         )
         return self._outputs_to_dataset(data_module, outputs, product="biochemical_fluorescence")
 
+    def _energy_result_fields(self) -> tuple[list[str], list[str]]:
+        physiology_fields = [name for name in LeafBiochemistryResult.__dataclass_fields__ if name != "fcount"]
+        energy_fields = [
+            name for name in CanopyEnergyBalanceResult.__dataclass_fields__ if name not in {"sunlit", "shaded", "Tsold"}
+        ]
+        return physiology_fields, energy_fields
+
+    def _build_energy_batch_inputs(
+        self,
+        batch: Mapping[str, torch.Tensor],
+        *,
+        varmap: Mapping[str, str],
+        hotspot_var: str | None,
+        nlayers: int | None,
+        soil_heat_method: int,
+    ) -> _EnergyBatchInputs:
+        get_optional = lambda key, default=None: self._optional_batch_input(batch, varmap, key, default)
+        leafbio = LeafBioBatch(**self._leafbio_kwargs(batch, varmap))
+        biochem = LeafBiochemistryInputs(**self._biochemistry_kwargs(batch, varmap))
+        lai = batch[varmap["LAI"]]
+        tts = batch[varmap["tts"]]
+        tto = batch[varmap["tto"]]
+        psi = batch[varmap["psi"]]
+        Esun_sw = self._spectral_input(batch, varmap, "Esun_sw")
+        Esky_sw = self._spectral_input(batch, varmap, "Esky_sw")
+        Esun_lw = self._optional_spectral_input(batch, varmap, "Esun_lw")
+        Esky_lw = self._optional_spectral_input(batch, varmap, "Esky_lw")
+        soil_refl = self._soil_refl(batch, varmap)
+        hotspot = (
+            batch[hotspot_var] if hotspot_var and hotspot_var in batch else torch.full_like(lai, self.default_hotspot)
+        )
+
+        meteo = EnergyBalanceMeteo(
+            Ta=batch[varmap["Ta"]],
+            ea=batch[varmap["ea"]],
+            Ca=batch[varmap["Ca"]],
+            Oa=batch[varmap["Oa"]],
+            p=batch[varmap["p"]],
+            z=batch[varmap["z"]],
+            u=batch[varmap["u"]],
+            L=get_optional("L", -1e6),
+        )
+        canopy = EnergyBalanceCanopy(
+            Cd=batch[varmap["Cd"]],
+            rwc=batch[varmap["rwc"]],
+            z0m=batch[varmap["z0m"]],
+            d=batch[varmap["d"]],
+            h=batch[varmap["h"]],
+            kV=get_optional("kV", 0.0),
+            fV=get_optional("fV"),
+        )
+        soil = EnergyBalanceSoil(
+            rss=batch[varmap["rss"]],
+            rbs=batch[varmap["rbs"]],
+            thermal_optics=ThermalOptics(
+                rho_thermal=get_optional("rho_thermal", 0.01),
+                tau_thermal=get_optional("tau_thermal", 0.01),
+                rs_thermal=get_optional("rs_thermal", 0.06),
+            ),
+            soil_heat_method=soil_heat_method,
+            GAM=get_optional("GAM", 0.0),
+            Tsold=get_optional("Tsold"),
+            dt_seconds=get_optional("dt_seconds"),
+        )
+        Tcu0 = get_optional("Tcu0")
+        Tch0 = get_optional("Tch0")
+        Tsu0 = get_optional("Tsu0")
+        Tsh0 = get_optional("Tsh0")
+        resolved_nlayers = self._layer_count(
+            nlayers,
+            etau=canopy.fV if isinstance(canopy.fV, torch.Tensor) else None,
+            etah=None,
+            Tcu=Tcu0,
+            Tch=Tch0,
+        )
+        return _EnergyBatchInputs(
+            leafbio=leafbio,
+            biochem=biochem,
+            lai=lai,
+            tts=tts,
+            tto=tto,
+            psi=psi,
+            Esun_sw=Esun_sw,
+            Esky_sw=Esky_sw,
+            Esun_lw=Esun_lw,
+            Esky_lw=Esky_lw,
+            soil_refl=soil_refl,
+            hotspot=hotspot,
+            meteo=meteo,
+            canopy=canopy,
+            soil=soil,
+            nlayers=resolved_nlayers,
+            Tcu0=Tcu0,
+            Tch0=Tch0,
+            Tsu0=Tsu0,
+            Tsh0=Tsh0,
+        )
+
+    def _solve_energy_batch(
+        self,
+        inputs: _EnergyBatchInputs,
+        *,
+        energy_options: EnergyBalanceOptions | None,
+        biochem_options: BiochemicalOptions | None,
+    ) -> CanopyEnergyBalanceResult:
+        return self.energy_balance_model.solve(
+            inputs.leafbio,
+            inputs.biochem,
+            inputs.soil_refl,
+            inputs.lai,
+            inputs.tts,
+            inputs.tto,
+            inputs.psi,
+            inputs.Esun_sw,
+            inputs.Esky_sw,
+            Esun_lw=inputs.Esun_lw,
+            Esky_lw=inputs.Esky_lw,
+            meteo=inputs.meteo,
+            canopy=inputs.canopy,
+            soil=inputs.soil,
+            options=energy_options,
+            biochem_options=biochem_options,
+            hotspot=inputs.hotspot,
+            nlayers=inputs.nlayers,
+            Tcu0=inputs.Tcu0,
+            Tch0=inputs.Tch0,
+            Tsu0=inputs.Tsu0,
+            Tsh0=inputs.Tsh0,
+        )
+
+    def _append_energy_outputs(
+        self,
+        outputs: dict[str, list[torch.Tensor]],
+        result: CanopyEnergyBalanceResult,
+        *,
+        energy_fields: Sequence[str],
+        physiology_fields: Sequence[str],
+    ) -> None:
+        for name in energy_fields:
+            outputs[name].append(getattr(result, name))
+        for name in physiology_fields:
+            outputs[f"sunlit_{name}"].append(getattr(result.sunlit, name))
+            outputs[f"shaded_{name}"].append(getattr(result.shaded, name))
+
+    def _energy_excitation_spectra(self, inputs: _EnergyBatchInputs) -> tuple[torch.Tensor, torch.Tensor]:
+        wlP = self.fluspect.spectral.wlP
+        wlE = self.fluspect.spectral.wlE
+        if wlE is None:
+            raise ValueError("Spectral grids must define excitation wavelengths")
+        batch = inputs.lai.shape[0]
+        Esun = self.fluorescence_model._prepare_spectrum(inputs.Esun_sw, batch, wlP.numel())
+        Esky = self.fluorescence_model._prepare_spectrum(inputs.Esky_sw, batch, wlP.numel())
+        return (
+            self.fluorescence_model._sample_spectrum(Esun, wlP, wlE),
+            self.fluorescence_model._sample_spectrum(Esky, wlP, wlE),
+        )
+
+    def run_energy_balance(
+        self,
+        data_module: ScopeGridDataModule,
+        *,
+        varmap: Mapping[str, str],
+        biochem_options: BiochemicalOptions | None = None,
+        energy_options: EnergyBalanceOptions | None = None,
+        hotspot_var: str | None = None,
+        nlayers: int | None = None,
+        soil_heat_method: int = 2,
+    ) -> dict[str, torch.Tensor]:
+        physiology_fields, energy_fields = self._energy_result_fields()
+        outputs: dict[str, list[torch.Tensor]] = {
+            **{name: [] for name in energy_fields},
+            **{f"sunlit_{name}": [] for name in physiology_fields},
+            **{f"shaded_{name}": [] for name in physiology_fields},
+        }
+        for batch in data_module.iter_batches():
+            inputs = self._build_energy_batch_inputs(
+                batch,
+                varmap=varmap,
+                hotspot_var=hotspot_var,
+                nlayers=nlayers,
+                soil_heat_method=soil_heat_method,
+            )
+            result = self._solve_energy_batch(
+                inputs,
+                energy_options=energy_options,
+                biochem_options=biochem_options,
+            )
+            self._append_energy_outputs(
+                outputs,
+                result,
+                energy_fields=energy_fields,
+                physiology_fields=physiology_fields,
+            )
+        return self._concat_outputs(outputs)
+
+    def run_energy_balance_dataset(
+        self,
+        data_module: ScopeGridDataModule,
+        *,
+        varmap: Mapping[str, str],
+        biochem_options: BiochemicalOptions | None = None,
+        energy_options: EnergyBalanceOptions | None = None,
+        hotspot_var: str | None = None,
+        nlayers: int | None = None,
+        soil_heat_method: int = 2,
+    ) -> xr.Dataset:
+        outputs = self.run_energy_balance(
+            data_module,
+            varmap=varmap,
+            biochem_options=biochem_options,
+            energy_options=energy_options,
+            hotspot_var=hotspot_var,
+            nlayers=nlayers,
+            soil_heat_method=soil_heat_method,
+        )
+        return self._outputs_to_dataset(data_module, outputs, product="energy_balance")
+
     def run_energy_balance_fluorescence(
         self,
         data_module: ScopeGridDataModule,
@@ -451,10 +693,7 @@ class ScopeGridRunner:
         nlayers: int | None = None,
         soil_heat_method: int = 2,
     ) -> dict[str, torch.Tensor]:
-        physiology_fields = [name for name in LeafBiochemistryResult.__dataclass_fields__ if name != "fcount"]
-        energy_fields = [
-            name for name in CanopyEnergyBalanceResult.__dataclass_fields__ if name not in {"sunlit", "shaded", "Tsold"}
-        ]
+        physiology_fields, energy_fields = self._energy_result_fields()
         outputs: dict[str, list[torch.Tensor]] = {
             **{name: [] for name in CanopyFluorescenceResult.__dataclass_fields__},
             **{name: [] for name in energy_fields},
@@ -462,99 +701,47 @@ class ScopeGridRunner:
             **{f"shaded_{name}": [] for name in physiology_fields},
         }
         for batch in _progress(data_module.iter_batches(), desc="energy-balance-fluorescence"):
-            leaf_kwargs = self._leafbio_kwargs(batch, varmap)
-            leafbio = LeafBioBatch(**leaf_kwargs)
-            biochem = LeafBiochemistryInputs(**self._biochemistry_kwargs(batch, varmap))
-            lai = batch[varmap["LAI"]]
-            tts = batch[varmap["tts"]]
-            tto = batch[varmap["tto"]]
-            psi = batch[varmap["psi"]]
-            Esun_sw = self._spectral_input(batch, varmap, "Esun_sw")
-            Esky_sw = self._spectral_input(batch, varmap, "Esky_sw")
-            soil_refl = self._soil_refl(batch, varmap)
-            if hotspot_var and hotspot_var in batch:
-                hotspot = batch[hotspot_var]
-            else:
-                hotspot = torch.full_like(lai, self.default_hotspot)
-
-            meteo = EnergyBalanceMeteo(
-                Ta=batch[varmap["Ta"]],
-                ea=batch[varmap["ea"]],
-                Ca=batch[varmap["Ca"]],
-                Oa=batch[varmap["Oa"]],
-                p=batch[varmap["p"]],
-                z=batch[varmap["z"]],
-                u=batch[varmap["u"]],
-                L=batch[varmap["L"]] if "L" in varmap and varmap["L"] in batch else -1e6,
-            )
-            canopy = EnergyBalanceCanopy(
-                Cd=batch[varmap["Cd"]],
-                rwc=batch[varmap["rwc"]],
-                z0m=batch[varmap["z0m"]],
-                d=batch[varmap["d"]],
-                h=batch[varmap["h"]],
-                kV=batch[varmap["kV"]] if "kV" in varmap and varmap["kV"] in batch else 0.0,
-                fV=batch[varmap["fV"]] if "fV" in varmap and varmap["fV"] in batch else None,
-            )
-            soil = EnergyBalanceSoil(
-                rss=batch[varmap["rss"]],
-                rbs=batch[varmap["rbs"]],
-                thermal_optics=ThermalOptics(
-                    rho_thermal=batch[varmap["rho_thermal"]]
-                    if "rho_thermal" in varmap and varmap["rho_thermal"] in batch
-                    else 0.01,
-                    tau_thermal=batch[varmap["tau_thermal"]]
-                    if "tau_thermal" in varmap and varmap["tau_thermal"] in batch
-                    else 0.01,
-                    rs_thermal=batch[varmap["rs_thermal"]]
-                    if "rs_thermal" in varmap and varmap["rs_thermal"] in batch
-                    else 0.06,
-                ),
+            inputs = self._build_energy_batch_inputs(
+                batch,
+                varmap=varmap,
+                hotspot_var=hotspot_var,
+                nlayers=nlayers,
                 soil_heat_method=soil_heat_method,
-                GAM=batch[varmap["GAM"]] if "GAM" in varmap and varmap["GAM"] in batch else 0.0,
-                Tsold=batch[varmap["Tsold"]] if "Tsold" in varmap and varmap["Tsold"] in batch else None,
-                dt_seconds=batch[varmap["dt_seconds"]]
-                if "dt_seconds" in varmap and varmap["dt_seconds"] in batch
-                else None,
             )
-
             result = self.energy_balance_model.solve_fluorescence(
-                leafbio,
-                biochem,
-                soil_refl,
-                lai,
-                tts,
-                tto,
-                psi,
-                Esun_sw,
-                Esky_sw,
-                meteo=meteo,
-                canopy=canopy,
-                soil=soil,
+                inputs.leafbio,
+                inputs.biochem,
+                inputs.soil_refl,
+                inputs.lai,
+                inputs.tts,
+                inputs.tto,
+                inputs.psi,
+                inputs.Esun_sw,
+                inputs.Esky_sw,
+                Esun_lw=inputs.Esun_lw,
+                Esky_lw=inputs.Esky_lw,
+                meteo=inputs.meteo,
+                canopy=inputs.canopy,
+                soil=inputs.soil,
                 options=energy_options,
                 biochem_options=biochem_options,
-                hotspot=hotspot,
-                nlayers=self._layer_count(
-                    nlayers,
-                    etau=canopy.fV if isinstance(canopy.fV, torch.Tensor) else None,
-                    etah=None,
-                    Tcu=batch[varmap["Tcu0"]] if "Tcu0" in varmap and varmap["Tcu0"] in batch else None,
-                    Tch=batch[varmap["Tch0"]] if "Tch0" in varmap and varmap["Tch0"] in batch else None,
-                ),
-                Tcu0=batch[varmap["Tcu0"]] if "Tcu0" in varmap and varmap["Tcu0"] in batch else None,
-                Tch0=batch[varmap["Tch0"]] if "Tch0" in varmap and varmap["Tch0"] in batch else None,
-                Tsu0=batch[varmap["Tsu0"]] if "Tsu0" in varmap and varmap["Tsu0"] in batch else None,
-                Tsh0=batch[varmap["Tsh0"]] if "Tsh0" in varmap and varmap["Tsh0"] in batch else None,
+                hotspot=inputs.hotspot,
+                nlayers=inputs.nlayers,
+                Tcu0=inputs.Tcu0,
+                Tch0=inputs.Tch0,
+                Tsu0=inputs.Tsu0,
+                Tsh0=inputs.Tsh0,
             )
             for name in CanopyFluorescenceResult.__dataclass_fields__:
                 outputs[name].append(getattr(result.fluorescence, name))
-            for name in energy_fields:
-                outputs[name].append(getattr(result.energy, name))
-            for name in physiology_fields:
-                outputs[f"sunlit_{name}"].append(getattr(result.energy.sunlit, name))
-                outputs[f"shaded_{name}"].append(getattr(result.energy.shaded, name))
+            self._append_energy_outputs(
+                outputs,
+                result.energy,
+                energy_fields=energy_fields,
+                physiology_fields=physiology_fields,
+            )
 
-        return {name: torch.cat(chunks, dim=0) for name, chunks in outputs.items()}
+        return self._concat_outputs(outputs)
 
     def run_energy_balance_fluorescence_dataset(
         self,
@@ -589,10 +776,7 @@ class ScopeGridRunner:
         nlayers: int | None = None,
         soil_heat_method: int = 2,
     ) -> dict[str, torch.Tensor]:
-        physiology_fields = [name for name in LeafBiochemistryResult.__dataclass_fields__ if name != "fcount"]
-        energy_fields = [
-            name for name in CanopyEnergyBalanceResult.__dataclass_fields__ if name not in {"sunlit", "shaded", "Tsold"}
-        ]
+        physiology_fields, energy_fields = self._energy_result_fields()
         outputs: dict[str, list[torch.Tensor]] = {
             **{name: [] for name in CanopyThermalRadianceResult.__dataclass_fields__},
             **{name: [] for name in energy_fields},
@@ -600,99 +784,47 @@ class ScopeGridRunner:
             **{f"shaded_{name}": [] for name in physiology_fields},
         }
         for batch in _progress(data_module.iter_batches(), desc="energy-balance-thermal"):
-            leaf_kwargs = self._leafbio_kwargs(batch, varmap)
-            leafbio = LeafBioBatch(**leaf_kwargs)
-            biochem = LeafBiochemistryInputs(**self._biochemistry_kwargs(batch, varmap))
-            lai = batch[varmap["LAI"]]
-            tts = batch[varmap["tts"]]
-            tto = batch[varmap["tto"]]
-            psi = batch[varmap["psi"]]
-            Esun_sw = self._spectral_input(batch, varmap, "Esun_sw")
-            Esky_sw = self._spectral_input(batch, varmap, "Esky_sw")
-            soil_refl = self._soil_refl(batch, varmap)
-            if hotspot_var and hotspot_var in batch:
-                hotspot = batch[hotspot_var]
-            else:
-                hotspot = torch.full_like(lai, self.default_hotspot)
-
-            meteo = EnergyBalanceMeteo(
-                Ta=batch[varmap["Ta"]],
-                ea=batch[varmap["ea"]],
-                Ca=batch[varmap["Ca"]],
-                Oa=batch[varmap["Oa"]],
-                p=batch[varmap["p"]],
-                z=batch[varmap["z"]],
-                u=batch[varmap["u"]],
-                L=batch[varmap["L"]] if "L" in varmap and varmap["L"] in batch else -1e6,
-            )
-            canopy = EnergyBalanceCanopy(
-                Cd=batch[varmap["Cd"]],
-                rwc=batch[varmap["rwc"]],
-                z0m=batch[varmap["z0m"]],
-                d=batch[varmap["d"]],
-                h=batch[varmap["h"]],
-                kV=batch[varmap["kV"]] if "kV" in varmap and varmap["kV"] in batch else 0.0,
-                fV=batch[varmap["fV"]] if "fV" in varmap and varmap["fV"] in batch else None,
-            )
-            soil = EnergyBalanceSoil(
-                rss=batch[varmap["rss"]],
-                rbs=batch[varmap["rbs"]],
-                thermal_optics=ThermalOptics(
-                    rho_thermal=batch[varmap["rho_thermal"]]
-                    if "rho_thermal" in varmap and varmap["rho_thermal"] in batch
-                    else 0.01,
-                    tau_thermal=batch[varmap["tau_thermal"]]
-                    if "tau_thermal" in varmap and varmap["tau_thermal"] in batch
-                    else 0.01,
-                    rs_thermal=batch[varmap["rs_thermal"]]
-                    if "rs_thermal" in varmap and varmap["rs_thermal"] in batch
-                    else 0.06,
-                ),
+            inputs = self._build_energy_batch_inputs(
+                batch,
+                varmap=varmap,
+                hotspot_var=hotspot_var,
+                nlayers=nlayers,
                 soil_heat_method=soil_heat_method,
-                GAM=batch[varmap["GAM"]] if "GAM" in varmap and varmap["GAM"] in batch else 0.0,
-                Tsold=batch[varmap["Tsold"]] if "Tsold" in varmap and varmap["Tsold"] in batch else None,
-                dt_seconds=batch[varmap["dt_seconds"]]
-                if "dt_seconds" in varmap and varmap["dt_seconds"] in batch
-                else None,
             )
-
             result = self.energy_balance_model.solve_thermal(
-                leafbio,
-                biochem,
-                soil_refl,
-                lai,
-                tts,
-                tto,
-                psi,
-                Esun_sw,
-                Esky_sw,
-                meteo=meteo,
-                canopy=canopy,
-                soil=soil,
+                inputs.leafbio,
+                inputs.biochem,
+                inputs.soil_refl,
+                inputs.lai,
+                inputs.tts,
+                inputs.tto,
+                inputs.psi,
+                inputs.Esun_sw,
+                inputs.Esky_sw,
+                Esun_lw=inputs.Esun_lw,
+                Esky_lw=inputs.Esky_lw,
+                meteo=inputs.meteo,
+                canopy=inputs.canopy,
+                soil=inputs.soil,
                 options=energy_options,
                 biochem_options=biochem_options,
-                hotspot=hotspot,
-                nlayers=self._layer_count(
-                    nlayers,
-                    etau=canopy.fV if isinstance(canopy.fV, torch.Tensor) else None,
-                    etah=None,
-                    Tcu=batch[varmap["Tcu0"]] if "Tcu0" in varmap and varmap["Tcu0"] in batch else None,
-                    Tch=batch[varmap["Tch0"]] if "Tch0" in varmap and varmap["Tch0"] in batch else None,
-                ),
-                Tcu0=batch[varmap["Tcu0"]] if "Tcu0" in varmap and varmap["Tcu0"] in batch else None,
-                Tch0=batch[varmap["Tch0"]] if "Tch0" in varmap and varmap["Tch0"] in batch else None,
-                Tsu0=batch[varmap["Tsu0"]] if "Tsu0" in varmap and varmap["Tsu0"] in batch else None,
-                Tsh0=batch[varmap["Tsh0"]] if "Tsh0" in varmap and varmap["Tsh0"] in batch else None,
+                hotspot=inputs.hotspot,
+                nlayers=inputs.nlayers,
+                Tcu0=inputs.Tcu0,
+                Tch0=inputs.Tch0,
+                Tsu0=inputs.Tsu0,
+                Tsh0=inputs.Tsh0,
             )
             for name in CanopyThermalRadianceResult.__dataclass_fields__:
                 outputs[name].append(getattr(result.thermal, name))
-            for name in energy_fields:
-                outputs[name].append(getattr(result.energy, name))
-            for name in physiology_fields:
-                outputs[f"sunlit_{name}"].append(getattr(result.energy.sunlit, name))
-                outputs[f"shaded_{name}"].append(getattr(result.energy.shaded, name))
+            self._append_energy_outputs(
+                outputs,
+                result.energy,
+                energy_fields=energy_fields,
+                physiology_fields=physiology_fields,
+            )
 
-        return {name: torch.cat(chunks, dim=0) for name, chunks in outputs.items()}
+        return self._concat_outputs(outputs)
 
     def run_energy_balance_thermal_dataset(
         self,
@@ -1246,6 +1378,7 @@ class ScopeGridRunner:
         calc_vert_profiles = self._scope_option_flag(data_module, scope_options, "calc_vert_profiles")
         calc_fluor = self._scope_option_flag(data_module, scope_options, "calc_fluor")
         calc_planck = self._scope_option_flag(data_module, scope_options, "calc_planck")
+        calc_ebal = self._scope_option_flag(data_module, scope_options, "calc_ebal")
         reflectance_varmap = self._workflow_reflectance_varmap(varmap)
 
         datasets = [
@@ -1288,87 +1421,104 @@ class ScopeGridRunner:
             )
             components.append("reflectance_profile")
 
-        if calc_fluor:
-            datasets.append(
-                self.run_layered_fluorescence_dataset(
-                    data_module,
-                    varmap=varmap,
-                    hotspot_var=hotspot_var,
-                    nlayers=nlayers,
-                )
+        if calc_ebal:
+            coupled_datasets, coupled_components = self._run_coupled_scope_datasets(
+                data_module,
+                varmap=varmap,
+                calc_fluor=calc_fluor,
+                calc_planck=calc_planck,
+                calc_directional=calc_directional,
+                calc_vert_profiles=calc_vert_profiles,
+                directional_tto=directional_tto,
+                directional_psi=directional_psi,
+                hotspot_var=hotspot_var,
+                nlayers=nlayers,
+                soil_heat_method=self._scope_option_int(data_module, scope_options, "soil_heat_method", default=2),
             )
-            components.append("fluorescence")
-
-            if calc_directional:
+            datasets.extend(coupled_datasets)
+            components.extend(coupled_components)
+        else:
+            if calc_fluor:
                 datasets.append(
-                    self._prefixed_dataset(
-                        self.run_directional_fluorescence_dataset(
-                            data_module,
-                            varmap=varmap,
-                            directional_tto=directional_tto,
-                            directional_psi=directional_psi,
-                            hotspot_var=hotspot_var,
-                            nlayers=nlayers,
-                        ),
-                        "fluorescence_directional",
+                    self.run_layered_fluorescence_dataset(
+                        data_module,
+                        varmap=varmap,
+                        hotspot_var=hotspot_var,
+                        nlayers=nlayers,
                     )
                 )
-                components.append("fluorescence_directional")
+                components.append("fluorescence")
 
-            if calc_vert_profiles:
+                if calc_directional:
+                    datasets.append(
+                        self._prefixed_dataset(
+                            self.run_directional_fluorescence_dataset(
+                                data_module,
+                                varmap=varmap,
+                                directional_tto=directional_tto,
+                                directional_psi=directional_psi,
+                                hotspot_var=hotspot_var,
+                                nlayers=nlayers,
+                            ),
+                            "fluorescence_directional",
+                        )
+                    )
+                    components.append("fluorescence_directional")
+
+                if calc_vert_profiles:
+                    datasets.append(
+                        self._prefixed_dataset(
+                            self.run_fluorescence_profiles_dataset(
+                                data_module,
+                                varmap=varmap,
+                                hotspot_var=hotspot_var,
+                                nlayers=nlayers,
+                            ),
+                            "fluorescence_profile",
+                        )
+                    )
+                    components.append("fluorescence_profile")
+
+            if calc_planck:
                 datasets.append(
-                    self._prefixed_dataset(
-                        self.run_fluorescence_profiles_dataset(
-                            data_module,
-                            varmap=varmap,
-                            hotspot_var=hotspot_var,
-                            nlayers=nlayers,
-                        ),
-                        "fluorescence_profile",
+                    self.run_thermal_dataset(
+                        data_module,
+                        varmap=varmap,
+                        hotspot_var=hotspot_var,
+                        nlayers=nlayers,
                     )
                 )
-                components.append("fluorescence_profile")
+                components.append("thermal")
 
-        if calc_planck:
-            datasets.append(
-                self.run_thermal_dataset(
-                    data_module,
-                    varmap=varmap,
-                    hotspot_var=hotspot_var,
-                    nlayers=nlayers,
-                )
-            )
-            components.append("thermal")
-
-            if calc_directional:
-                datasets.append(
-                    self._prefixed_dataset(
-                        self.run_directional_thermal_dataset(
-                            data_module,
-                            varmap=varmap,
-                            directional_tto=directional_tto,
-                            directional_psi=directional_psi,
-                            hotspot_var=hotspot_var,
-                            nlayers=nlayers,
-                        ),
-                        "thermal_directional",
+                if calc_directional:
+                    datasets.append(
+                        self._prefixed_dataset(
+                            self.run_directional_thermal_dataset(
+                                data_module,
+                                varmap=varmap,
+                                directional_tto=directional_tto,
+                                directional_psi=directional_psi,
+                                hotspot_var=hotspot_var,
+                                nlayers=nlayers,
+                            ),
+                            "thermal_directional",
+                        )
                     )
-                )
-                components.append("thermal_directional")
+                    components.append("thermal_directional")
 
-            if calc_vert_profiles:
-                datasets.append(
-                    self._prefixed_dataset(
-                        self.run_thermal_profiles_dataset(
-                            data_module,
-                            varmap=varmap,
-                            hotspot_var=hotspot_var,
-                            nlayers=nlayers,
-                        ),
-                        "thermal_profile",
+                if calc_vert_profiles:
+                    datasets.append(
+                        self._prefixed_dataset(
+                            self.run_thermal_profiles_dataset(
+                                data_module,
+                                varmap=varmap,
+                                hotspot_var=hotspot_var,
+                                nlayers=nlayers,
+                            ),
+                            "thermal_profile",
+                        )
                     )
-                )
-                components.append("thermal_profile")
+                    components.append("thermal_profile")
 
         return self._merge_workflow_datasets(
             data_module,
@@ -1384,14 +1534,17 @@ class ScopeGridRunner:
         outputs: Mapping[str, torch.Tensor],
         *,
         product: str,
+        layer_count: int | None = None,
     ) -> xr.Dataset:
         dataset_outputs = {name: self._dataset_tensor(value) for name, value in outputs.items()}
-        layer_count = self._output_layer_count(data_module, dataset_outputs)
+        resolved_layer_count = layer_count
+        if resolved_layer_count is None:
+            resolved_layer_count = self._output_layer_count(data_module, dataset_outputs)
         variable_dims = {
-            name: self._infer_output_dims(name, tensor, layer_count=layer_count)
+            name: self._infer_output_dims(name, tensor, layer_count=resolved_layer_count)
             for name, tensor in dataset_outputs.items()
         }
-        variable_coords = self._output_coords(layer_count)
+        variable_coords = self._output_coords(resolved_layer_count)
         return data_module.assemble_dataset(
             dataset_outputs,
             variable_dims=variable_dims,
@@ -1429,6 +1582,306 @@ class ScopeGridRunner:
     def _prefixed_dataset(self, dataset: xr.Dataset, prefix: str) -> xr.Dataset:
         rename_map = {name: f"{prefix}_{name}" for name in dataset.data_vars}
         return annotate_dataset(dataset.rename(rename_map))
+
+    def _run_coupled_scope_datasets(
+        self,
+        data_module: ScopeGridDataModule,
+        *,
+        varmap: Mapping[str, str],
+        calc_fluor: bool,
+        calc_planck: bool,
+        calc_directional: bool,
+        calc_vert_profiles: bool,
+        directional_tto: torch.Tensor | None,
+        directional_psi: torch.Tensor | None,
+        hotspot_var: str | None,
+        nlayers: int | None,
+        soil_heat_method: int,
+    ) -> tuple[list[xr.Dataset], list[str]]:
+        physiology_fields, energy_fields = self._energy_result_fields()
+        coupled_layer_count: int | None = None
+        energy_outputs: dict[str, list[torch.Tensor]] = {
+            **{name: [] for name in energy_fields},
+            **{f"sunlit_{name}": [] for name in physiology_fields},
+            **{f"shaded_{name}": [] for name in physiology_fields},
+        }
+
+        def _init(names: Sequence[str]) -> dict[str, list[torch.Tensor]]:
+            return {name: [] for name in names}
+
+        fluorescence_outputs = _init(CanopyFluorescenceResult.__dataclass_fields__) if calc_fluor else None
+        thermal_outputs = _init(CanopyThermalRadianceResult.__dataclass_fields__) if calc_planck else None
+        fluorescence_directional_outputs = _init(("LoF_",)) if calc_fluor and calc_directional else None
+        thermal_directional_outputs = _init(("Lot_", "BrightnessT")) if calc_planck and calc_directional else None
+        fluorescence_profile_outputs = (
+            _init(CanopyFluorescenceProfileResult.__dataclass_fields__) if calc_fluor and calc_vert_profiles else None
+        )
+        thermal_profile_outputs = (
+            _init(CanopyThermalProfileResult.__dataclass_fields__) if calc_planck and calc_vert_profiles else None
+        )
+        need_directional_angles = (
+            fluorescence_directional_outputs is not None or thermal_directional_outputs is not None
+        )
+        if need_directional_angles:
+            tto_angles, psi_angles = self._directional_angles(
+                data_module,
+                varmap=varmap,
+                directional_tto=directional_tto,
+                directional_psi=directional_psi,
+            )
+        else:
+            tto_angles = psi_angles = None
+
+        for batch in data_module.iter_batches():
+            inputs = self._build_energy_batch_inputs(
+                batch,
+                varmap=varmap,
+                hotspot_var=hotspot_var,
+                nlayers=nlayers,
+                soil_heat_method=soil_heat_method,
+            )
+            energy = self._solve_energy_batch(
+                inputs,
+                energy_options=None,
+                biochem_options=None,
+            )
+            current_layer_count = self._layer_count(
+                inputs.nlayers,
+                etau=energy.sunlit.eta,
+                etah=energy.shaded.eta,
+                Tcu=energy.Tcu,
+                Tch=energy.Tch,
+            )
+            if current_layer_count is not None:
+                if coupled_layer_count is not None and coupled_layer_count != current_layer_count:
+                    raise ValueError("Coupled scope workflows require a uniform layer count across all batches")
+                coupled_layer_count = current_layer_count
+            self._append_energy_outputs(
+                energy_outputs,
+                energy,
+                energy_fields=energy_fields,
+                physiology_fields=physiology_fields,
+            )
+
+            excitation_spectra: tuple[torch.Tensor, torch.Tensor] | None = None
+            if fluorescence_directional_outputs is not None or fluorescence_profile_outputs is not None:
+                excitation_spectra = self._energy_excitation_spectra(inputs)
+
+            if fluorescence_outputs is not None:
+                fluorescence = self.energy_balance_model._fluorescence_from_energy(
+                    energy=energy,
+                    leafbio=inputs.leafbio,
+                    soil_refl=inputs.soil_refl,
+                    lai=inputs.lai,
+                    tts=inputs.tts,
+                    tto=inputs.tto,
+                    psi=inputs.psi,
+                    Esun_sw=inputs.Esun_sw,
+                    Esky_sw=inputs.Esky_sw,
+                    hotspot=inputs.hotspot,
+                    lidf=None,
+                )
+                for name in fluorescence_outputs:
+                    fluorescence_outputs[name].append(getattr(fluorescence, name))
+
+                if fluorescence_directional_outputs is not None:
+                    assert tto_angles is not None and psi_angles is not None and excitation_spectra is not None
+                    Esun_e, Esky_e = excitation_spectra
+                    directional = self.fluorescence_model.directional(
+                        inputs.leafbio,
+                        inputs.soil_refl,
+                        inputs.lai,
+                        inputs.tts,
+                        tto_angles,
+                        psi_angles,
+                        Esun_e,
+                        Esky_e,
+                        etau=energy.sunlit.eta,
+                        etah=energy.shaded.eta,
+                        hotspot=inputs.hotspot,
+                        nlayers=inputs.nlayers,
+                    )
+                    fluorescence_directional_outputs["LoF_"].append(directional.LoF_)
+
+                if fluorescence_profile_outputs is not None:
+                    assert excitation_spectra is not None
+                    Esun_e, Esky_e = excitation_spectra
+                    profiles = self.fluorescence_model.profiles(
+                        inputs.leafbio,
+                        inputs.soil_refl,
+                        inputs.lai,
+                        inputs.tts,
+                        inputs.tto,
+                        inputs.psi,
+                        Esun_e,
+                        Esky_e,
+                        etau=energy.sunlit.eta,
+                        etah=energy.shaded.eta,
+                        hotspot=inputs.hotspot,
+                        nlayers=inputs.nlayers,
+                    )
+                    for name in fluorescence_profile_outputs:
+                        fluorescence_profile_outputs[name].append(getattr(profiles, name))
+
+            if thermal_outputs is not None:
+                thermal = self.energy_balance_model._thermal_from_energy(
+                    energy=energy,
+                    lai=inputs.lai,
+                    tts=inputs.tts,
+                    tto=inputs.tto,
+                    psi=inputs.psi,
+                    thermal_optics=inputs.soil.thermal_optics,
+                    hotspot=inputs.hotspot,
+                    lidf=None,
+                    wlT=None,
+                )
+                for name in thermal_outputs:
+                    thermal_outputs[name].append(getattr(thermal, name))
+
+                if thermal_directional_outputs is not None:
+                    assert tto_angles is not None and psi_angles is not None
+                    directional = self.thermal_model.directional(
+                        inputs.lai,
+                        inputs.tts,
+                        tto_angles,
+                        psi_angles,
+                        energy.Tcu,
+                        energy.Tch,
+                        energy.Tsu,
+                        energy.Tsh,
+                        thermal_optics=inputs.soil.thermal_optics,
+                        hotspot=inputs.hotspot,
+                        nlayers=inputs.nlayers,
+                    )
+                    thermal_directional_outputs["Lot_"].append(directional.Lot_)
+                    thermal_directional_outputs["BrightnessT"].append(directional.BrightnessT)
+
+                if thermal_profile_outputs is not None:
+                    profiles = self.thermal_model.profiles(
+                        inputs.lai,
+                        inputs.tts,
+                        inputs.tto,
+                        inputs.psi,
+                        energy.Tcu,
+                        energy.Tch,
+                        energy.Tsu,
+                        energy.Tsh,
+                        thermal_optics=inputs.soil.thermal_optics,
+                        hotspot=inputs.hotspot,
+                        nlayers=inputs.nlayers,
+                    )
+                    for name in thermal_profile_outputs:
+                        thermal_profile_outputs[name].append(getattr(profiles, name))
+
+        datasets: list[xr.Dataset] = []
+        components: list[str] = []
+
+        def _add(dataset: xr.Dataset, component: str) -> None:
+            datasets.append(dataset)
+            components.append(component)
+
+        _add(
+            self._outputs_to_dataset(data_module, self._concat_outputs(energy_outputs), product="energy_balance"),
+            "energy_balance",
+        )
+
+        if fluorescence_outputs is not None:
+            _add(
+                self._outputs_to_dataset(
+                    data_module,
+                    self._concat_outputs(fluorescence_outputs),
+                    product="energy_balance_fluorescence",
+                    layer_count=coupled_layer_count,
+                ),
+                "energy_balance_fluorescence",
+            )
+
+        if fluorescence_directional_outputs is not None:
+            assert tto_angles is not None and psi_angles is not None
+            _add(
+                self._prefixed_dataset(
+                    self._directional_outputs_to_dataset(
+                        data_module,
+                        self._concat_outputs(fluorescence_directional_outputs),
+                        product="energy_balance_directional_fluorescence",
+                        directional_tto=tto_angles,
+                        directional_psi=psi_angles,
+                        variable_dims={"LoF_": ("direction", "fluorescence_wavelength")},
+                    ),
+                    "energy_balance_fluorescence_directional",
+                ),
+                "energy_balance_fluorescence_directional",
+            )
+
+        if fluorescence_profile_outputs is not None:
+            profile_dataset = self._profile_outputs_to_dataset(
+                data_module,
+                self._concat_outputs(fluorescence_profile_outputs),
+                product="energy_balance_fluorescence_profiles",
+                layer_count=self._profile_layer_count_from_tensor(fluorescence_profile_outputs["Ps"][0]),
+                variable_dims={
+                    "Ps": ("layer_interface",),
+                    "Po": ("layer_interface",),
+                    "Pso": ("layer_interface",),
+                    "Fmin_": ("layer_interface", "fluorescence_wavelength"),
+                    "Fplu_": ("layer_interface", "fluorescence_wavelength"),
+                    "layer_fluorescence": ("layer",),
+                },
+            )
+            _add(
+                self._prefixed_dataset(profile_dataset, "energy_balance_fluorescence_profile"),
+                "energy_balance_fluorescence_profile",
+            )
+
+        if thermal_outputs is not None:
+            _add(
+                self._outputs_to_dataset(
+                    data_module,
+                    self._concat_outputs(thermal_outputs),
+                    product="energy_balance_thermal",
+                    layer_count=coupled_layer_count,
+                ),
+                "energy_balance_thermal",
+            )
+
+        if thermal_directional_outputs is not None:
+            assert tto_angles is not None and psi_angles is not None
+            _add(
+                self._prefixed_dataset(
+                    self._directional_outputs_to_dataset(
+                        data_module,
+                        self._concat_outputs(thermal_directional_outputs),
+                        product="energy_balance_directional_thermal",
+                        directional_tto=tto_angles,
+                        directional_psi=psi_angles,
+                        variable_dims={"Lot_": ("direction", "thermal_wavelength"), "BrightnessT": ("direction",)},
+                    ),
+                    "energy_balance_thermal_directional",
+                ),
+                "energy_balance_thermal_directional",
+            )
+
+        if thermal_profile_outputs is not None:
+            profile_dataset = self._profile_outputs_to_dataset(
+                data_module,
+                self._concat_outputs(thermal_profile_outputs),
+                product="energy_balance_thermal_profiles",
+                layer_count=self._profile_layer_count_from_tensor(thermal_profile_outputs["Ps"][0]),
+                variable_dims={
+                    "Ps": ("layer_interface",),
+                    "Po": ("layer_interface",),
+                    "Pso": ("layer_interface",),
+                    "Emint_": ("layer_interface", "thermal_wavelength"),
+                    "Eplut_": ("layer_interface", "thermal_wavelength"),
+                    "layer_thermal_upward": ("layer",),
+                },
+            )
+            _add(
+                self._prefixed_dataset(profile_dataset, "energy_balance_thermal_profile"),
+                "energy_balance_thermal_profile",
+            )
+
+        return datasets, components
 
     def _directional_outputs_to_dataset(
         self,
@@ -1648,6 +2101,30 @@ class ScopeGridRunner:
             raise KeyError(f"varmap must provide '{key}'")
         return batch[varmap[key]]
 
+    def _optional_spectral_input(
+        self,
+        batch: Mapping[str, torch.Tensor],
+        varmap: Mapping[str, str],
+        key: str,
+    ) -> torch.Tensor | None:
+        if key not in varmap or varmap[key] not in batch:
+            return None
+        return batch[varmap[key]]
+
+    def _optional_batch_input(
+        self,
+        batch: Mapping[str, torch.Tensor],
+        varmap: Mapping[str, str],
+        key: str,
+        default,
+    ):
+        if key in varmap and varmap[key] in batch:
+            return batch[varmap[key]]
+        return default
+
+    def _concat_outputs(self, outputs: Mapping[str, Sequence[torch.Tensor]]) -> dict[str, torch.Tensor]:
+        return {name: torch.cat(list(chunks), dim=0) for name, chunks in outputs.items()}
+
     def _optical_directional_input(
         self,
         batch: Mapping[str, torch.Tensor],
@@ -1717,6 +2194,19 @@ class ScopeGridRunner:
         if scope_options and name in scope_options:
             return self._as_bool(scope_options[name], default=default)
         return self._as_bool(data_module.dataset.attrs.get(name, default), default=default)
+
+    def _scope_option_int(
+        self,
+        data_module: ScopeGridDataModule,
+        scope_options: Mapping[str, object] | None,
+        name: str,
+        *,
+        default: int,
+    ) -> int:
+        if scope_options and name in scope_options and scope_options[name] is not None:
+            return int(scope_options[name])
+        value = data_module.dataset.attrs.get(name, default)
+        return default if value is None else int(value)
 
     def _as_bool(self, value: object, *, default: bool) -> bool:
         if value is None:

@@ -61,6 +61,8 @@ Use `scope vars --workflow fluorescence` for terminal lookup.
 | `Esky_` | W m-2 um-1 | Diffuse excitation irradiance spectrum for fluorescence. | - | docs/input-output-reference.md | - |
 | `Esun_sw` | W m-2 um-1 | Direct shortwave irradiance spectrum used by reflectance and energy-balance workflows. | - | docs/input-output-reference.md | - |
 | `Esky_sw` | W m-2 um-1 | Diffuse shortwave irradiance spectrum used by reflectance and energy-balance workflows. | - | docs/input-output-reference.md | - |
+| `Esun_lw` | W m-2 um-1 | Direct longwave irradiance spectrum used by coupled energy-balance workflows. | - | docs/input-output-reference.md | - |
+| `Esky_lw` | W m-2 um-1 | Diffuse longwave irradiance spectrum used by coupled energy-balance workflows. | - | docs/input-output-reference.md | - |
 
 ## Fluorescence Transport
 

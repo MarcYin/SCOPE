@@ -6,7 +6,9 @@ from pathlib import Path
 from typing import Any
 
 import numpy as np
+import pandas as pd
 import torch
+import xarray as xr
 from scipy.io import loadmat
 
 from scope.biochem import LeafBiochemistryInputs, LeafMeteo
@@ -14,6 +16,8 @@ from scope.canopy.fluorescence import CanopyFluorescenceModel
 from scope.canopy.foursail import FourSAILModel
 from scope.canopy.reflectance import CanopyReflectanceModel
 from scope.canopy.thermal import CanopyThermalRadianceModel, ThermalOptics
+from scope.config import SimulationConfig
+from scope.data import ScopeGridDataModule
 from scope.energy import (
     CanopyEnergyBalanceModel,
     EnergyBalanceCanopy,
@@ -23,6 +27,7 @@ from scope.energy import (
     ResistanceInputs,
     aerodynamic_resistances,
 )
+from scope.runners import ScopeGridRunner
 from scope.spectral.fluspect import FluspectModel, LeafBioBatch
 
 
@@ -115,6 +120,123 @@ def _scope_refl_from_rso_rdo(
 
 def _record(report: dict[str, dict[str, dict[str, float]]], section: str, name: str, predicted: torch.Tensor, reference: torch.Tensor) -> None:
     report.setdefault(section, {})[name] = _metrics(predicted, reference)
+
+
+def _scene_scalar(value: Any) -> np.ndarray:
+    return np.asarray([[[_scalar(value)]]], dtype=np.float64)
+
+
+def _scene_spectrum(value: Any) -> np.ndarray:
+    return np.asarray(value, dtype=np.float64).reshape(1, 1, 1, -1)
+
+
+def _scope_grid_module_from_benchmark(
+    benchmark: dict[str, Any],
+    *,
+    device: torch.device,
+    dtype: torch.dtype,
+) -> tuple[ScopeGridRunner, ScopeGridDataModule]:
+    repo_root = Path(__file__).resolve().parents[1]
+    scope_root = repo_root / "upstream" / "SCOPE"
+
+    wlF = _vector(benchmark["wlF"], device=device, dtype=dtype)
+    wlE = _vector(benchmark["wlE"], device=device, dtype=dtype)
+    fluspect = FluspectModel.from_scope_assets(
+        scope_root_path=str(scope_root),
+        device=device,
+        dtype=dtype,
+        wlF=wlF,
+        wlE=wlE,
+    )
+
+    lidf = _vector(benchmark["canopy_lidf"], device=device, dtype=dtype)
+    sail = FourSAILModel(lidf=lidf)
+    runner = ScopeGridRunner(
+        fluspect,
+        sail,
+        lidf=lidf,
+        default_hotspot=_scalar(benchmark["canopy_hot"]),
+    )
+
+    wavelength = fluspect.spectral.wlP.detach().cpu().numpy()
+    thermal_wavelength = _vector(benchmark["wlT"], device=device, dtype=dtype).detach().cpu().numpy()
+    time = pd.DatetimeIndex([pd.Timestamp("2000-01-01T12:00:00")])
+    soil_heat_method = int(round(_scalar(benchmark["soil_heat_method"]))) if "soil_heat_method" in benchmark else 2
+    dataset = xr.Dataset(
+        {
+            "Cab": (("y", "x", "time"), _scene_scalar(benchmark["leaf_Cab"])),
+            "Cca": (("y", "x", "time"), _scene_scalar(benchmark["leaf_Cca"])),
+            "Cw": (("y", "x", "time"), _scene_scalar(benchmark["leaf_Cw"])),
+            "Cdm": (("y", "x", "time"), _scene_scalar(benchmark["leaf_Cdm"])),
+            "Cs": (("y", "x", "time"), _scene_scalar(benchmark["leaf_Cs"])),
+            "Cant": (("y", "x", "time"), _scene_scalar(benchmark["leaf_Cant"])),
+            "Cbc": (("y", "x", "time"), _scene_scalar(benchmark["leaf_Cbc"])),
+            "Cp": (("y", "x", "time"), _scene_scalar(benchmark["leaf_Cp"])),
+            "N": (("y", "x", "time"), _scene_scalar(benchmark["leaf_N"])),
+            "fqe": (("y", "x", "time"), _scene_scalar(benchmark["leaf_fqe"])),
+            "LAI": (("y", "x", "time"), _scene_scalar(benchmark["canopy_LAI"])),
+            "tts": (("y", "x", "time"), _scene_scalar(benchmark["tts"])),
+            "tto": (("y", "x", "time"), _scene_scalar(benchmark["tto"])),
+            "psi": (("y", "x", "time"), _scene_scalar(benchmark["psi"])),
+            "soil_refl": (("y", "x", "time", "wavelength"), _scene_spectrum(benchmark["soil_refl"])),
+            "Esun_sw": (("y", "x", "time", "wavelength"), _scene_spectrum(benchmark["Esun_wlP"])),
+            "Esky_sw": (("y", "x", "time", "wavelength"), _scene_spectrum(benchmark["Esky_wlP"])),
+            "Esun_lw": (("y", "x", "time", "thermal_wavelength"), _scene_spectrum(benchmark["Esun_wlT"])),
+            "Esky_lw": (("y", "x", "time", "thermal_wavelength"), _scene_spectrum(benchmark["Esky_wlT"])),
+            "Ta": (("y", "x", "time"), _scene_scalar(benchmark["meteo_Ta"])),
+            "ea": (("y", "x", "time"), _scene_scalar(benchmark["meteo_ea"])),
+            "Ca": (("y", "x", "time"), _scene_scalar(benchmark["meteo_Ca"])),
+            "Oa": (("y", "x", "time"), _scene_scalar(benchmark["meteo_Oa"])),
+            "p": (("y", "x", "time"), _scene_scalar(benchmark["meteo_p"])),
+            "z": (("y", "x", "time"), _scene_scalar(benchmark["meteo_z"])),
+            "u": (("y", "x", "time"), _scene_scalar(benchmark["meteo_u"])),
+            "Cd": (("y", "x", "time"), _scene_scalar(benchmark["canopy_Cd"])),
+            "rwc": (("y", "x", "time"), _scene_scalar(benchmark["canopy_rwc"])),
+            "z0m": (("y", "x", "time"), _scene_scalar(benchmark["canopy_zo"])),
+            "d": (("y", "x", "time"), _scene_scalar(benchmark["canopy_d"])),
+            "h": (("y", "x", "time"), _scene_scalar(benchmark["canopy_hc"])),
+            "kV": (("y", "x", "time"), _scene_scalar(benchmark["canopy_kV"])),
+            "rss": (("y", "x", "time"), _scene_scalar(benchmark["soil_rss"])),
+            "rbs": (("y", "x", "time"), _scene_scalar(benchmark["soil_rbs"])),
+            "rho_thermal": (("y", "x", "time"), _scene_scalar(benchmark["leaf_rho_thermal"])),
+            "tau_thermal": (("y", "x", "time"), _scene_scalar(benchmark["leaf_tau_thermal"])),
+            "rs_thermal": (("y", "x", "time"), _scene_scalar(benchmark["soil_rs_thermal"])),
+            "Vcmax25": (("y", "x", "time"), _scene_scalar(benchmark["biochem_Vcmax25"])),
+            "BallBerrySlope": (("y", "x", "time"), _scene_scalar(benchmark["biochem_BallBerrySlope"])),
+            "BallBerry0": (("y", "x", "time"), _scene_scalar(benchmark["biochem_BallBerry0"])),
+            "RdPerVcmax25": (("y", "x", "time"), _scene_scalar(benchmark["biochem_RdPerVcmax25"])),
+            "Kn0": (("y", "x", "time"), _scene_scalar(benchmark["biochem_Kn0"])),
+            "Knalpha": (("y", "x", "time"), _scene_scalar(benchmark["biochem_Knalpha"])),
+            "Knbeta": (("y", "x", "time"), _scene_scalar(benchmark["biochem_Knbeta"])),
+            "stressfactor": (("y", "x", "time"), _scene_scalar(benchmark["biochem_stressfactor"])),
+        },
+        coords={
+            "y": np.array([0]),
+            "x": np.array([0]),
+            "time": time,
+            "wavelength": wavelength,
+            "thermal_wavelength": thermal_wavelength,
+        },
+        attrs={
+            "calc_ebal": 1,
+            "calc_fluor": 1,
+            "calc_planck": 1,
+            "calc_directional": 0,
+            "calc_vert_profiles": 0,
+            "soil_heat_method": soil_heat_method,
+        },
+    )
+
+    config = SimulationConfig(
+        roi_bounds=(0.0, 0.0, 1.0, 1.0),
+        start_time=time[0].to_pydatetime(),
+        end_time=time[0].to_pydatetime(),
+        device=str(device),
+        dtype=dtype,
+        chunk_size=1,
+    )
+    module = ScopeGridDataModule(dataset, config, required_vars=list(dataset.data_vars))
+    return runner, module
 
 
 def _print_report(report: dict[str, dict[str, dict[str, float]]]) -> None:
@@ -560,6 +682,52 @@ def main() -> int:
     _record(report, "energy_balance", "rawc", energy.rawc, torch.tensor([_scalar(benchmark["resistance_rawc"])], device=device, dtype=dtype))
     _record(report, "energy_balance", "raws", energy.raws, torch.tensor([_scalar(benchmark["resistance_raws"])], device=device, dtype=dtype))
     _record(report, "energy_balance", "ustar", energy.ustar, torch.tensor([_scalar(benchmark["resistance_ustar"])], device=device, dtype=dtype))
+
+    scope_runner, scope_module = _scope_grid_module_from_benchmark(benchmark, device=device, dtype=dtype)
+    scope_outputs = scope_runner.run_scope_dataset(
+        scope_module,
+        varmap={name: name for name in scope_module.dataset.data_vars},
+        nlayers=nlayers,
+    )
+    scope_rso = _tensor(scope_outputs["rso"].values, device=device, dtype=dtype)
+    scope_rdo = _tensor(scope_outputs["rdo"].values, device=device, dtype=dtype)
+    scope_refl = _scope_refl_from_rso_rdo(scope_rso, scope_rdo, esun_wlp, esky_wlp, esky_max=esky_full_max)
+    _record(report, "scope_workflow", "rso", scope_rso, _vector(benchmark["canopy_rso"], device=device, dtype=dtype))
+    _record(report, "scope_workflow", "rsd", _tensor(scope_outputs["rsd"].values, device=device, dtype=dtype), _vector(benchmark["canopy_rsd"], device=device, dtype=dtype))
+    _record(report, "scope_workflow", "rdd", _tensor(scope_outputs["rdd"].values, device=device, dtype=dtype), _vector(benchmark["canopy_rdd"], device=device, dtype=dtype))
+    _record(report, "scope_workflow", "rdo", scope_rdo, _vector(benchmark["canopy_rdo"], device=device, dtype=dtype))
+    _record(report, "scope_workflow", "refl", scope_refl, _vector(benchmark["canopy_refl"], device=device, dtype=dtype))
+    _record(report, "scope_workflow", "LoF_", _tensor(scope_outputs["LoF_"].values, device=device, dtype=dtype), _vector(benchmark["fluor_LoF"], device=device, dtype=dtype))
+    _record(report, "scope_workflow", "EoutF_", _tensor(scope_outputs["EoutF_"].values, device=device, dtype=dtype), _vector(benchmark["fluor_EoutF"], device=device, dtype=dtype))
+    _record(report, "scope_workflow", "EoutFrc_", _tensor(scope_outputs["EoutFrc_"].values, device=device, dtype=dtype), _vector(benchmark["fluor_EoutFrc"], device=device, dtype=dtype))
+    _record(report, "scope_workflow", "Femleaves_", _tensor(scope_outputs["Femleaves_"].values, device=device, dtype=dtype), _vector(benchmark["fluor_Femleaves"], device=device, dtype=dtype))
+    _record(report, "scope_workflow", "sigmaF", _tensor(scope_outputs["sigmaF"].values, device=device, dtype=dtype), _vector(benchmark["fluor_sigmaF"], device=device, dtype=dtype))
+    _record(report, "scope_workflow", "LoF_sunlit", _tensor(scope_outputs["LoF_sunlit"].values, device=device, dtype=dtype), _vector(benchmark["fluor_LoF_sunlit"], device=device, dtype=dtype))
+    _record(report, "scope_workflow", "LoF_shaded", _tensor(scope_outputs["LoF_shaded"].values, device=device, dtype=dtype), _vector(benchmark["fluor_LoF_shaded"], device=device, dtype=dtype))
+    _record(report, "scope_workflow", "LoF_scattered", _tensor(scope_outputs["LoF_scattered"].values, device=device, dtype=dtype), _vector(benchmark["fluor_LoF_scattered"], device=device, dtype=dtype))
+    _record(report, "scope_workflow", "LoF_soil", _tensor(scope_outputs["LoF_soil"].values, device=device, dtype=dtype), _vector(benchmark["fluor_LoF_soil"], device=device, dtype=dtype))
+    _record(report, "scope_workflow", "Fmin_", _tensor(scope_outputs["Fmin_"].values, device=device, dtype=dtype), _tensor(benchmark["fluor_Fmin"], device=device, dtype=dtype))
+    _record(report, "scope_workflow", "Fplu_", _tensor(scope_outputs["Fplu_"].values, device=device, dtype=dtype), _tensor(benchmark["fluor_Fplu"], device=device, dtype=dtype))
+    _record(report, "scope_workflow", "Lot_", _tensor(scope_outputs["Lot_"].values, device=device, dtype=dtype), _vector(benchmark["thermal_Lot"], device=device, dtype=dtype))
+    _record(report, "scope_workflow", "Eoutte_", _tensor(scope_outputs["Eoutte_"].values, device=device, dtype=dtype), _vector(benchmark["thermal_Eoutte"], device=device, dtype=dtype))
+    _record(report, "scope_workflow", "Loutt", _tensor(scope_outputs["Loutt"].values, device=device, dtype=dtype), torch.tensor([_scalar(benchmark["thermal_Loutt"])], device=device, dtype=dtype))
+    _record(report, "scope_workflow", "Eoutt", _tensor(scope_outputs["Eoutt"].values, device=device, dtype=dtype), torch.tensor([_scalar(benchmark["thermal_Eoutt"])], device=device, dtype=dtype))
+    _record(report, "scope_workflow", "sunlit_eta", _tensor(scope_outputs["sunlit_eta"].values, device=device, dtype=dtype), _batch_profile(benchmark["energy_sunlit_eta"], device=device, dtype=dtype))
+    _record(report, "scope_workflow", "shaded_eta", _tensor(scope_outputs["shaded_eta"].values, device=device, dtype=dtype), _batch_profile(benchmark["energy_shaded_eta"], device=device, dtype=dtype))
+    _record(report, "scope_workflow", "sunlit_A", _tensor(scope_outputs["sunlit_A"].values, device=device, dtype=dtype), _batch_profile(benchmark["energy_sunlit_A"], device=device, dtype=dtype))
+    _record(report, "scope_workflow", "shaded_A", _tensor(scope_outputs["shaded_A"].values, device=device, dtype=dtype), _batch_profile(benchmark["energy_shaded_A"], device=device, dtype=dtype))
+    _record(report, "scope_workflow", "sunlit_Ci", _tensor(scope_outputs["sunlit_Ci"].values, device=device, dtype=dtype), _batch_profile(benchmark["energy_sunlit_Ci"], device=device, dtype=dtype))
+    _record(report, "scope_workflow", "shaded_Ci", _tensor(scope_outputs["shaded_Ci"].values, device=device, dtype=dtype), _batch_profile(benchmark["energy_shaded_Ci"], device=device, dtype=dtype))
+    _record(report, "scope_workflow", "sunlit_rcw", _tensor(scope_outputs["sunlit_rcw"].values, device=device, dtype=dtype), _batch_profile(benchmark["energy_sunlit_rcw"], device=device, dtype=dtype))
+    _record(report, "scope_workflow", "shaded_rcw", _tensor(scope_outputs["shaded_rcw"].values, device=device, dtype=dtype), _batch_profile(benchmark["energy_shaded_rcw"], device=device, dtype=dtype))
+    _record(report, "scope_workflow", "Tcu", _tensor(scope_outputs["Tcu"].values, device=device, dtype=dtype), _batch_profile(benchmark["energy_Tcu"], device=device, dtype=dtype))
+    _record(report, "scope_workflow", "Tch", _tensor(scope_outputs["Tch"].values, device=device, dtype=dtype), _batch_profile(benchmark["energy_Tch"], device=device, dtype=dtype))
+    _record(report, "scope_workflow", "Tsu", _tensor(scope_outputs["Tsu"].values, device=device, dtype=dtype), torch.tensor([_scalar(benchmark["energy_Tsu"])], device=device, dtype=dtype))
+    _record(report, "scope_workflow", "Tsh", _tensor(scope_outputs["Tsh"].values, device=device, dtype=dtype), torch.tensor([_scalar(benchmark["energy_Tsh"])], device=device, dtype=dtype))
+    _record(report, "scope_workflow", "Rntot", _tensor(scope_outputs["Rntot"].values, device=device, dtype=dtype), torch.tensor([_scalar(benchmark["flux_Rntot"])], device=device, dtype=dtype))
+    _record(report, "scope_workflow", "lEtot", _tensor(scope_outputs["lEtot"].values, device=device, dtype=dtype), torch.tensor([_scalar(benchmark["flux_lEtot"])], device=device, dtype=dtype))
+    _record(report, "scope_workflow", "Htot", _tensor(scope_outputs["Htot"].values, device=device, dtype=dtype), torch.tensor([_scalar(benchmark["flux_Htot"])], device=device, dtype=dtype))
+    _record(report, "scope_workflow", "counter", _tensor(scope_outputs["counter"].values, device=device, dtype=dtype), torch.tensor([_scalar(benchmark["energy_counter"])], device=device, dtype=dtype))
 
     _print_report(report)
 

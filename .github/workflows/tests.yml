@@ -155,7 +155,7 @@ jobs:
     name: MATLAB parity (opt-in self-hosted)
     if: ${{ github.event_name == 'workflow_dispatch' && inputs.run_matlab }}
     runs-on: [self-hosted, matlab]
-    timeout-minutes: 120
+    timeout-minutes: 240
     env:
       MATLAB_BIN: ${{ vars.MATLAB_BIN != '' && vars.MATLAB_BIN || 'matlab' }}
     steps:
@@ -190,3 +190,26 @@ jobs:
           PYTHONPATH: src
           SCOPE_REQUIRE_MATLAB: "1"
         run: python -m pytest -q tests/test_scope_benchmark_parity.py tests/test_scope_timeseries_benchmark_parity.py
+
+      - name: Run live MATLAB benchmark suite
+        env:
+          PYTHONPATH: src
+          SCOPE_REQUIRE_MATLAB: "1"
+        run: |
+          tmpdir="${RUNNER_TEMP}/matlab-benchmark-suite"
+          rm -rf "$tmpdir"
+          mkdir -p "$tmpdir"
+          python scripts/run_scope_benchmark_suite.py \
+            --matlab "$MATLAB_BIN" \
+            --reports-dir "$tmpdir/benchmark_suite_reports" \
+            --summary-json "$tmpdir/scope_benchmark_suite_summary.json"
+
+      - name: Upload MATLAB benchmark suite summary
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: matlab-benchmark-suite
+          path: |
+            ${{ runner.temp }}/matlab-benchmark-suite/benchmark_suite_reports/*
+            ${{ runner.temp }}/matlab-benchmark-suite/scope_benchmark_suite_summary.json
+          if-no-files-found: error
