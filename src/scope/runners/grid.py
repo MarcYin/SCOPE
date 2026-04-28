@@ -2,13 +2,30 @@ from __future__ import annotations
 
 import logging
 from collections import Counter
-from collections.abc import Mapping, Sequence
+from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass
 
 import torch
 import xarray as xr
 
 logger = logging.getLogger(__name__)
+
+_DIRECTIONAL_INPUT_KEYS = frozenset({"directional_tto", "directional_psi"})
+_SPECTRAL_1D_INPUT_KEYS = frozenset(
+    {
+        "soil_refl",
+        "excitation",
+        "Esun_",
+        "Esky_",
+        "Esun_sw",
+        "Esky_sw",
+        "Esun_lw",
+        "Esky_lw",
+        "rho_thermal",
+        "tau_thermal",
+        "rs_thermal",
+    }
+)
 
 try:
     from tqdm.auto import tqdm as _tqdm
@@ -82,12 +99,74 @@ class _EnergyBatchInputs:
 
 
 class _TensorBatchDataModule:
-    def __init__(self, batch: Mapping[str, torch.Tensor], attrs: Mapping[str, object] | None = None) -> None:
+    def __init__(
+        self,
+        batch: Mapping[str, torch.Tensor],
+        attrs: Mapping[str, object] | None = None,
+        *,
+        chunk_size: int | None = None,
+        batch_size: int | None = None,
+        non_batch_1d_vars: Iterable[str] = (),
+        non_batch_vars: Iterable[str] = (),
+    ) -> None:
         self._batch = batch
         self.dataset = xr.Dataset(attrs=dict(attrs or {}))
+        self._chunk_size = chunk_size
+        self._non_batch_1d_vars = frozenset(non_batch_1d_vars)
+        self._non_batch_vars = frozenset(non_batch_vars)
+        self._batch_size = self._infer_batch_size() if batch_size is None else int(batch_size)
+        if self._batch_size <= 0:
+            raise ValueError(f"batch_size must be positive, got {self._batch_size}")
+        if self._chunk_size is not None and self._chunk_size <= 0:
+            raise ValueError(f"chunk_size must be positive, got {self._chunk_size}")
 
     def iter_batches(self):
-        yield self._batch
+        for chunk in self._chunks():
+            yield {name: self._chunk_tensor(name, tensor, chunk) for name, tensor in self._batch.items()}
+
+    def batch_size(self) -> int:
+        return self._batch_size
+
+    def _infer_batch_size(self) -> int:
+        candidate_sizes: set[int] = set()
+        for name, tensor in self._batch.items():
+            if self._is_non_batch_tensor(name, tensor):
+                continue
+            if tensor.ndim == 0:
+                continue
+            size = int(tensor.shape[0])
+            if size != 1:
+                candidate_sizes.add(size)
+        if len(candidate_sizes) > 1:
+            sizes = ", ".join(str(size) for size in sorted(candidate_sizes))
+            raise ValueError(f"Could not infer a unique tensor batch size from leading dimensions: {sizes}")
+        return candidate_sizes.pop() if candidate_sizes else 1
+
+    def _chunks(self) -> Sequence[slice]:
+        if self._chunk_size is None or self._chunk_size >= self._batch_size:
+            return (slice(0, self._batch_size),)
+        return tuple(
+            slice(start, min(start + self._chunk_size, self._batch_size))
+            for start in range(0, self._batch_size, self._chunk_size)
+        )
+
+    def _chunk_tensor(self, name: str, tensor: torch.Tensor, chunk: slice) -> torch.Tensor:
+        if self._is_non_batch_tensor(name, tensor):
+            return tensor
+        if tensor.ndim == 0:
+            return tensor
+        size = int(tensor.shape[0])
+        if size == self._batch_size:
+            return tensor[chunk]
+        if size == 1 or self._batch_size == 1:
+            return tensor
+        raise ValueError(
+            f"Tensor input '{name}' has leading dimension {size}, which cannot broadcast to batch size "
+            f"{self._batch_size}"
+        )
+
+    def _is_non_batch_tensor(self, name: str, tensor: torch.Tensor) -> bool:
+        return name in self._non_batch_vars or (name in self._non_batch_1d_vars and tensor.ndim == 1)
 
 
 class ScopeGridRunner:
@@ -1385,8 +1464,14 @@ class ScopeGridRunner:
         directional_psi: torch.Tensor | None = None,
         hotspot_var: str | None = None,
         nlayers: int | None = None,
+        chunk_size: int | None = 1024,
+        batch_size: int | None = None,
     ) -> dict[str, torch.Tensor]:
-        """Run a SCOPE workflow directly on tensors without xarray assembly."""
+        """Run a SCOPE workflow directly on tensors without xarray assembly.
+
+        Direct tensor execution is chunked by default to cap peak model memory. Set
+        ``chunk_size=None`` to run the entire tensor batch in one forward pass.
+        """
 
         tensor_inputs = self._normalise_tensor_inputs(inputs)
         resolved_varmap = dict(varmap or {name: name for name in tensor_inputs})
@@ -1399,7 +1484,14 @@ class ScopeGridRunner:
             if directional_name in tensor_inputs:
                 directional_psi = tensor_inputs[directional_name]
 
-        data_module = _TensorBatchDataModule(tensor_inputs, attrs=scope_options)
+        data_module = _TensorBatchDataModule(
+            tensor_inputs,
+            attrs=scope_options,
+            chunk_size=chunk_size,
+            batch_size=batch_size,
+            non_batch_1d_vars=self._non_batch_1d_tensor_vars(resolved_varmap),
+            non_batch_vars=self._non_batch_tensor_vars(resolved_varmap),
+        )
         return self._run_named_tensor_workflow(
             data_module,
             workflow="scope" if workflow is None else workflow,
@@ -1412,6 +1504,102 @@ class ScopeGridRunner:
             hotspot_var=hotspot_var,
             nlayers=nlayers,
         )
+
+    def iter_scope_tensors(
+        self,
+        inputs: Mapping[str, torch.Tensor | float | int],
+        *,
+        varmap: Mapping[str, str] | None = None,
+        workflow: str | None = None,
+        scope_options: Mapping[str, object] | None = None,
+        energy_options: EnergyBalanceOptions | None = None,
+        biochem_options: BiochemicalOptions | None = None,
+        directional_tto: torch.Tensor | None = None,
+        directional_psi: torch.Tensor | None = None,
+        hotspot_var: str | None = None,
+        nlayers: int | None = None,
+        chunk_size: int | None = 1024,
+        batch_size: int | None = None,
+    ) -> Iterable[dict[str, torch.Tensor]]:
+        """Yield tensor-preserving SCOPE outputs one input chunk at a time."""
+
+        tensor_inputs = self._normalise_tensor_inputs(inputs)
+        resolved_varmap = dict(varmap or {name: name for name in tensor_inputs})
+        if directional_tto is None:
+            directional_name = resolved_varmap.get("directional_tto")
+            if directional_name in tensor_inputs:
+                directional_tto = tensor_inputs[directional_name]
+        if directional_psi is None:
+            directional_name = resolved_varmap.get("directional_psi")
+            if directional_name in tensor_inputs:
+                directional_psi = tensor_inputs[directional_name]
+
+        data_module = _TensorBatchDataModule(
+            tensor_inputs,
+            attrs=scope_options,
+            chunk_size=chunk_size,
+            batch_size=batch_size,
+            non_batch_1d_vars=self._non_batch_1d_tensor_vars(resolved_varmap),
+            non_batch_vars=self._non_batch_tensor_vars(resolved_varmap),
+        )
+        for batch in data_module.iter_batches():
+            chunk_module = _TensorBatchDataModule(
+                batch,
+                attrs=scope_options,
+                non_batch_1d_vars=self._non_batch_1d_tensor_vars(resolved_varmap),
+                non_batch_vars=self._non_batch_tensor_vars(resolved_varmap),
+            )
+            yield self._run_named_tensor_workflow(
+                chunk_module,
+                workflow="scope" if workflow is None else workflow,
+                varmap=resolved_varmap,
+                scope_options=scope_options,
+                energy_options=energy_options,
+                biochem_options=biochem_options,
+                directional_tto=directional_tto,
+                directional_psi=directional_psi,
+                hotspot_var=hotspot_var,
+                nlayers=nlayers,
+            )
+
+    def iter_scope_dataset_tensors(
+        self,
+        data_module: ScopeGridDataModule,
+        *,
+        varmap: Mapping[str, str],
+        scope_options: Mapping[str, object] | None = None,
+        energy_options: EnergyBalanceOptions | None = None,
+        biochem_options: BiochemicalOptions | None = None,
+        directional_tto: torch.Tensor | None = None,
+        directional_psi: torch.Tensor | None = None,
+        hotspot_var: str | None = None,
+        nlayers: int | None = None,
+        detach: bool = False,
+    ) -> Iterable[dict[str, torch.Tensor]]:
+        """Yield ``run_scope_dataset(..., return_tensors=True)`` outputs per configured chunk."""
+
+        if self._scope_option_flag(data_module, scope_options, "calc_directional"):
+            directional_tto, directional_psi = self._directional_angles(
+                data_module,
+                varmap=varmap,
+                directional_tto=directional_tto,
+                directional_psi=directional_psi,
+            )
+
+        for batch in data_module.iter_batches():
+            chunk_module = _TensorBatchDataModule(batch, attrs=data_module.dataset.attrs)
+            outputs = self._run_scope_tensor_workflow(
+                chunk_module,
+                varmap=varmap,
+                scope_options=scope_options,
+                energy_options=energy_options,
+                biochem_options=biochem_options,
+                directional_tto=directional_tto,
+                directional_psi=directional_psi,
+                hotspot_var=hotspot_var,
+                nlayers=nlayers,
+            )
+            yield self._detach_tensor_outputs(outputs) if detach else outputs
 
     def run_scope_dataset(
         self,
@@ -1945,6 +2133,22 @@ class ScopeGridRunner:
                 tensor = tensor.reshape(1)
             tensors[name] = tensor
         return tensors
+
+    def _non_batch_1d_tensor_vars(self, varmap: Mapping[str, str]) -> set[str]:
+        vars_: set[str] = set()
+        for key in _SPECTRAL_1D_INPUT_KEYS:
+            if key in varmap:
+                vars_.add(varmap[key])
+            vars_.add(key)
+        return vars_
+
+    def _non_batch_tensor_vars(self, varmap: Mapping[str, str]) -> set[str]:
+        vars_: set[str] = set()
+        for key in _DIRECTIONAL_INPUT_KEYS:
+            if key in varmap:
+                vars_.add(varmap[key])
+            vars_.add(key)
+        return vars_
 
     def _merge_tensor_component(
         self,
