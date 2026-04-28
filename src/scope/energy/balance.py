@@ -58,6 +58,7 @@ class EnergyBalanceSoil:
 class EnergyBalanceOptions:
     max_iter: int = 100
     max_energy_error: float = 1.0
+    fixed_iterations: bool = False
     monin_obukhov: bool = True
     initial_shaded_leaf_offset: float = 0.1
     initial_sunlit_leaf_offset: float = 0.3
@@ -241,6 +242,8 @@ class CanopyEnergyBalanceModel:
         Tsh0: torch.Tensor | None = None,
     ) -> CanopyEnergyBalanceResult:
         opts = options or EnergyBalanceOptions()
+        if opts.max_iter <= 0:
+            raise ValueError(f"Energy balance max_iter must be positive, got {opts.max_iter}")
         device = self.reflectance_model.fluspect.device
         dtype = self.reflectance_model.fluspect.dtype
 
@@ -470,7 +473,9 @@ class CanopyEnergyBalanceModel:
             L = torch.where(iterating, L_new, L)
 
             active = max_error > opts.max_energy_error
-            if not bool(active.any().item()) or iteration == opts.max_iter:
+            if iteration == opts.max_iter:
+                break
+            if not opts.fixed_iterations and not bool(active.any().item()):
                 break
 
             if iteration == 10:

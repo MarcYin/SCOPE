@@ -211,6 +211,49 @@ def test_energy_balance_converges_and_closes_fluxes():
     assert torch.allclose(result.Htot, result.Hctot + result.Hstot, atol=1e-10, rtol=1e-10)
 
 
+def test_energy_balance_fixed_iterations_runs_to_max_iter():
+    model, leafbio, biochemistry, soil_refl, lai, tts, tto, psi, Esun_sw, Esky_sw, meteo, canopy, soil, _ = (
+        _setup_energy_case()
+    )
+
+    early = model.solve(
+        leafbio,
+        biochemistry,
+        soil_refl,
+        lai,
+        tts,
+        tto,
+        psi,
+        Esun_sw,
+        Esky_sw,
+        meteo=meteo,
+        canopy=canopy,
+        soil=soil,
+        options=EnergyBalanceOptions(max_iter=4, max_energy_error=1e30),
+        nlayers=4,
+    )
+    fixed = model.solve(
+        leafbio,
+        biochemistry,
+        soil_refl,
+        lai,
+        tts,
+        tto,
+        psi,
+        Esun_sw,
+        Esky_sw,
+        meteo=meteo,
+        canopy=canopy,
+        soil=soil,
+        options=EnergyBalanceOptions(max_iter=4, max_energy_error=1e30, fixed_iterations=True),
+        nlayers=4,
+    )
+
+    assert torch.all(early.counter == 1)
+    assert torch.all(fixed.counter == 4)
+    assert torch.all(fixed.converged)
+
+
 def test_energy_balance_fv_profile_uses_upper_layer_edges():
     model, leafbio, _, soil_refl, lai, tts, tto, psi, Esun_sw, Esky_sw, _, canopy, _, _ = _setup_energy_case()
 

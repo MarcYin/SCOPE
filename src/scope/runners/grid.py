@@ -81,6 +81,15 @@ class _EnergyBatchInputs:
     Tsh0: torch.Tensor | None
 
 
+class _TensorBatchDataModule:
+    def __init__(self, batch: Mapping[str, torch.Tensor], attrs: Mapping[str, object] | None = None) -> None:
+        self._batch = batch
+        self.dataset = xr.Dataset(attrs=dict(attrs or {}))
+
+    def iter_batches(self):
+        yield self._batch
+
+
 class ScopeGridRunner:
     """Dispatch batched SCOPE simulations across ROI/time grids."""
 
@@ -1363,17 +1372,76 @@ class ScopeGridRunner:
             },
         )
 
+    def run_scope_tensors(
+        self,
+        inputs: Mapping[str, torch.Tensor | float | int],
+        *,
+        varmap: Mapping[str, str] | None = None,
+        workflow: str | None = None,
+        scope_options: Mapping[str, object] | None = None,
+        energy_options: EnergyBalanceOptions | None = None,
+        biochem_options: BiochemicalOptions | None = None,
+        directional_tto: torch.Tensor | None = None,
+        directional_psi: torch.Tensor | None = None,
+        hotspot_var: str | None = None,
+        nlayers: int | None = None,
+    ) -> dict[str, torch.Tensor]:
+        """Run a SCOPE workflow directly on tensors without xarray assembly."""
+
+        tensor_inputs = self._normalise_tensor_inputs(inputs)
+        resolved_varmap = dict(varmap or {name: name for name in tensor_inputs})
+        if directional_tto is None:
+            directional_name = resolved_varmap.get("directional_tto")
+            if directional_name in tensor_inputs:
+                directional_tto = tensor_inputs[directional_name]
+        if directional_psi is None:
+            directional_name = resolved_varmap.get("directional_psi")
+            if directional_name in tensor_inputs:
+                directional_psi = tensor_inputs[directional_name]
+
+        data_module = _TensorBatchDataModule(tensor_inputs, attrs=scope_options)
+        return self._run_named_tensor_workflow(
+            data_module,
+            workflow="scope" if workflow is None else workflow,
+            varmap=resolved_varmap,
+            scope_options=scope_options,
+            energy_options=energy_options,
+            biochem_options=biochem_options,
+            directional_tto=directional_tto,
+            directional_psi=directional_psi,
+            hotspot_var=hotspot_var,
+            nlayers=nlayers,
+        )
+
     def run_scope_dataset(
         self,
         data_module: ScopeGridDataModule,
         *,
         varmap: Mapping[str, str],
         scope_options: Mapping[str, object] | None = None,
+        energy_options: EnergyBalanceOptions | None = None,
+        biochem_options: BiochemicalOptions | None = None,
         directional_tto: torch.Tensor | None = None,
         directional_psi: torch.Tensor | None = None,
         hotspot_var: str | None = None,
         nlayers: int | None = None,
-    ) -> xr.Dataset:
+        return_tensors: bool = False,
+        detach: bool = False,
+    ) -> xr.Dataset | dict[str, torch.Tensor]:
+        if return_tensors:
+            outputs = self._run_scope_tensor_workflow(
+                data_module,
+                varmap=varmap,
+                scope_options=scope_options,
+                energy_options=energy_options,
+                biochem_options=biochem_options,
+                directional_tto=directional_tto,
+                directional_psi=directional_psi,
+                hotspot_var=hotspot_var,
+                nlayers=nlayers,
+            )
+            return self._detach_tensor_outputs(outputs) if detach else outputs
+
         calc_directional = self._scope_option_flag(data_module, scope_options, "calc_directional")
         calc_vert_profiles = self._scope_option_flag(data_module, scope_options, "calc_vert_profiles")
         calc_fluor = self._scope_option_flag(data_module, scope_options, "calc_fluor")
@@ -1433,6 +1501,8 @@ class ScopeGridRunner:
                 directional_psi=directional_psi,
                 hotspot_var=hotspot_var,
                 nlayers=nlayers,
+                energy_options=self._scope_energy_options(data_module, scope_options, energy_options),
+                biochem_options=biochem_options,
                 soil_heat_method=self._scope_option_int(data_module, scope_options, "soil_heat_method", default=2),
             )
             datasets.extend(coupled_datasets)
@@ -1528,6 +1598,287 @@ class ScopeGridRunner:
             scope_options=scope_options,
         )
 
+    def _run_named_tensor_workflow(
+        self,
+        data_module,
+        *,
+        workflow: str,
+        varmap: Mapping[str, str],
+        scope_options: Mapping[str, object] | None,
+        energy_options: EnergyBalanceOptions | None,
+        biochem_options: BiochemicalOptions | None,
+        directional_tto: torch.Tensor | None,
+        directional_psi: torch.Tensor | None,
+        hotspot_var: str | None,
+        nlayers: int | None,
+    ) -> dict[str, torch.Tensor]:
+        workflow_key = workflow.strip().lower().replace("-", "_")
+        soil_heat_method = self._scope_option_int(data_module, scope_options, "soil_heat_method", default=2)
+        resolved_energy_options = self._scope_energy_options(data_module, scope_options, energy_options)
+        if workflow_key in {"scope", "scope_workflow"}:
+            return self._run_scope_tensor_workflow(
+                data_module,
+                varmap=varmap,
+                scope_options=scope_options,
+                energy_options=resolved_energy_options,
+                biochem_options=biochem_options,
+                directional_tto=directional_tto,
+                directional_psi=directional_psi,
+                hotspot_var=hotspot_var,
+                nlayers=nlayers,
+            )
+        if workflow_key == "reflectance":
+            return self.run(data_module, varmap=varmap, hotspot_var=hotspot_var, nlayers=nlayers)
+        if workflow_key == "directional_reflectance":
+            return self.run_directional_reflectance(
+                data_module,
+                varmap=varmap,
+                directional_tto=directional_tto,
+                directional_psi=directional_psi,
+                hotspot_var=hotspot_var,
+                nlayers=nlayers,
+            )
+        if workflow_key == "reflectance_profiles":
+            return self.run_reflectance_profiles(data_module, varmap=varmap, hotspot_var=hotspot_var, nlayers=nlayers)
+        if workflow_key == "fluorescence":
+            return self.run_fluorescence(data_module, varmap=varmap, hotspot_var=hotspot_var)
+        if workflow_key == "layered_fluorescence":
+            return self.run_layered_fluorescence(data_module, varmap=varmap, hotspot_var=hotspot_var, nlayers=nlayers)
+        if workflow_key == "directional_fluorescence":
+            return self.run_directional_fluorescence(
+                data_module,
+                varmap=varmap,
+                directional_tto=directional_tto,
+                directional_psi=directional_psi,
+                hotspot_var=hotspot_var,
+                nlayers=nlayers,
+            )
+        if workflow_key == "fluorescence_profiles":
+            return self.run_fluorescence_profiles(data_module, varmap=varmap, hotspot_var=hotspot_var, nlayers=nlayers)
+        if workflow_key == "thermal":
+            return self.run_thermal(data_module, varmap=varmap, hotspot_var=hotspot_var, nlayers=nlayers)
+        if workflow_key == "directional_thermal":
+            return self.run_directional_thermal(
+                data_module,
+                varmap=varmap,
+                directional_tto=directional_tto,
+                directional_psi=directional_psi,
+                hotspot_var=hotspot_var,
+                nlayers=nlayers,
+            )
+        if workflow_key == "thermal_profiles":
+            return self.run_thermal_profiles(data_module, varmap=varmap, hotspot_var=hotspot_var, nlayers=nlayers)
+        if workflow_key == "biochemical_fluorescence":
+            return self.run_biochemical_fluorescence(
+                data_module,
+                varmap=varmap,
+                biochem_options=biochem_options,
+                hotspot_var=hotspot_var,
+                nlayers=nlayers,
+            )
+        if workflow_key == "energy_balance":
+            return self.run_energy_balance(
+                data_module,
+                varmap=varmap,
+                biochem_options=biochem_options,
+                energy_options=resolved_energy_options,
+                hotspot_var=hotspot_var,
+                nlayers=nlayers,
+                soil_heat_method=soil_heat_method,
+            )
+        if workflow_key == "energy_balance_fluorescence":
+            return self.run_energy_balance_fluorescence(
+                data_module,
+                varmap=varmap,
+                biochem_options=biochem_options,
+                energy_options=resolved_energy_options,
+                hotspot_var=hotspot_var,
+                nlayers=nlayers,
+                soil_heat_method=soil_heat_method,
+            )
+        if workflow_key == "energy_balance_thermal":
+            return self.run_energy_balance_thermal(
+                data_module,
+                varmap=varmap,
+                biochem_options=biochem_options,
+                energy_options=resolved_energy_options,
+                hotspot_var=hotspot_var,
+                nlayers=nlayers,
+                soil_heat_method=soil_heat_method,
+            )
+        raise ValueError(f"Unsupported SCOPE tensor workflow '{workflow}'")
+
+    def _run_scope_tensor_workflow(
+        self,
+        data_module,
+        *,
+        varmap: Mapping[str, str],
+        scope_options: Mapping[str, object] | None,
+        energy_options: EnergyBalanceOptions | None,
+        biochem_options: BiochemicalOptions | None,
+        directional_tto: torch.Tensor | None,
+        directional_psi: torch.Tensor | None,
+        hotspot_var: str | None,
+        nlayers: int | None,
+    ) -> dict[str, torch.Tensor]:
+        calc_directional = self._scope_option_flag(data_module, scope_options, "calc_directional")
+        calc_vert_profiles = self._scope_option_flag(data_module, scope_options, "calc_vert_profiles")
+        calc_fluor = self._scope_option_flag(data_module, scope_options, "calc_fluor")
+        calc_planck = self._scope_option_flag(data_module, scope_options, "calc_planck")
+        calc_ebal = self._scope_option_flag(data_module, scope_options, "calc_ebal")
+        reflectance_varmap = self._workflow_reflectance_varmap(varmap)
+        resolved_energy_options = self._scope_energy_options(data_module, scope_options, energy_options)
+
+        outputs: dict[str, torch.Tensor] = {}
+        self._merge_tensor_component(
+            outputs,
+            "reflectance",
+            self.run(data_module, varmap=varmap, hotspot_var=hotspot_var, nlayers=nlayers),
+        )
+
+        if calc_directional:
+            self._merge_tensor_component(
+                outputs,
+                "reflectance_directional",
+                self.run_directional_reflectance(
+                    data_module,
+                    varmap=reflectance_varmap,
+                    directional_tto=directional_tto,
+                    directional_psi=directional_psi,
+                    hotspot_var=hotspot_var,
+                    nlayers=nlayers,
+                ),
+                prefix="reflectance_directional",
+            )
+
+        if calc_vert_profiles:
+            self._merge_tensor_component(
+                outputs,
+                "reflectance_profile",
+                self.run_reflectance_profiles(
+                    data_module,
+                    varmap=reflectance_varmap,
+                    hotspot_var=hotspot_var,
+                    nlayers=nlayers,
+                ),
+                prefix="reflectance_profile",
+            )
+
+        if calc_ebal:
+            soil_heat_method = self._scope_option_int(data_module, scope_options, "soil_heat_method", default=2)
+            self._merge_tensor_component(
+                outputs,
+                "energy_balance",
+                self.run_energy_balance(
+                    data_module,
+                    varmap=varmap,
+                    biochem_options=biochem_options,
+                    energy_options=resolved_energy_options,
+                    hotspot_var=hotspot_var,
+                    nlayers=nlayers,
+                    soil_heat_method=soil_heat_method,
+                ),
+            )
+            if calc_fluor:
+                fluorescence = self.run_energy_balance_fluorescence(
+                    data_module,
+                    varmap=varmap,
+                    biochem_options=biochem_options,
+                    energy_options=resolved_energy_options,
+                    hotspot_var=hotspot_var,
+                    nlayers=nlayers,
+                    soil_heat_method=soil_heat_method,
+                )
+                self._merge_tensor_component(
+                    outputs,
+                    "energy_balance_fluorescence",
+                    {name: fluorescence[name] for name in CanopyFluorescenceResult.__dataclass_fields__},
+                )
+            if calc_planck:
+                thermal = self.run_energy_balance_thermal(
+                    data_module,
+                    varmap=varmap,
+                    biochem_options=biochem_options,
+                    energy_options=resolved_energy_options,
+                    hotspot_var=hotspot_var,
+                    nlayers=nlayers,
+                    soil_heat_method=soil_heat_method,
+                )
+                self._merge_tensor_component(
+                    outputs,
+                    "energy_balance_thermal",
+                    {name: thermal[name] for name in CanopyThermalRadianceResult.__dataclass_fields__},
+                )
+            return outputs
+
+        if calc_fluor:
+            self._merge_tensor_component(
+                outputs,
+                "fluorescence",
+                self.run_layered_fluorescence(
+                    data_module,
+                    varmap=varmap,
+                    hotspot_var=hotspot_var,
+                    nlayers=nlayers,
+                ),
+            )
+            if calc_directional:
+                self._merge_tensor_component(
+                    outputs,
+                    "fluorescence_directional",
+                    self.run_directional_fluorescence(
+                        data_module,
+                        varmap=varmap,
+                        directional_tto=directional_tto,
+                        directional_psi=directional_psi,
+                        hotspot_var=hotspot_var,
+                        nlayers=nlayers,
+                    ),
+                    prefix="fluorescence_directional",
+                )
+            if calc_vert_profiles:
+                self._merge_tensor_component(
+                    outputs,
+                    "fluorescence_profile",
+                    self.run_fluorescence_profiles(
+                        data_module,
+                        varmap=varmap,
+                        hotspot_var=hotspot_var,
+                        nlayers=nlayers,
+                    ),
+                    prefix="fluorescence_profile",
+                )
+
+        if calc_planck:
+            self._merge_tensor_component(
+                outputs,
+                "thermal",
+                self.run_thermal(data_module, varmap=varmap, hotspot_var=hotspot_var, nlayers=nlayers),
+            )
+            if calc_directional:
+                self._merge_tensor_component(
+                    outputs,
+                    "thermal_directional",
+                    self.run_directional_thermal(
+                        data_module,
+                        varmap=varmap,
+                        directional_tto=directional_tto,
+                        directional_psi=directional_psi,
+                        hotspot_var=hotspot_var,
+                        nlayers=nlayers,
+                    ),
+                    prefix="thermal_directional",
+                )
+            if calc_vert_profiles:
+                self._merge_tensor_component(
+                    outputs,
+                    "thermal_profile",
+                    self.run_thermal_profiles(data_module, varmap=varmap, hotspot_var=hotspot_var, nlayers=nlayers),
+                    prefix="thermal_profile",
+                )
+
+        return outputs
+
     def _outputs_to_dataset(
         self,
         data_module: ScopeGridDataModule,
@@ -1583,6 +1934,35 @@ class ScopeGridRunner:
         rename_map = {name: f"{prefix}_{name}" for name in dataset.data_vars}
         return annotate_dataset(dataset.rename(rename_map))
 
+    def _normalise_tensor_inputs(
+        self,
+        inputs: Mapping[str, torch.Tensor | float | int],
+    ) -> dict[str, torch.Tensor]:
+        tensors: dict[str, torch.Tensor] = {}
+        for name, value in inputs.items():
+            tensor = torch.as_tensor(value)
+            if tensor.ndim == 0:
+                tensor = tensor.reshape(1)
+            tensors[name] = tensor
+        return tensors
+
+    def _merge_tensor_component(
+        self,
+        merged: dict[str, torch.Tensor],
+        component: str,
+        outputs: Mapping[str, torch.Tensor],
+        *,
+        prefix: str | None = None,
+    ) -> None:
+        for name, value in outputs.items():
+            output_name = f"{prefix}_{name}" if prefix is not None else name
+            if output_name in merged:
+                output_name = f"{component}_{output_name}"
+            merged[output_name] = value
+
+    def _detach_tensor_outputs(self, outputs: Mapping[str, torch.Tensor]) -> dict[str, torch.Tensor]:
+        return {name: value.detach() for name, value in outputs.items()}
+
     def _run_coupled_scope_datasets(
         self,
         data_module: ScopeGridDataModule,
@@ -1596,6 +1976,8 @@ class ScopeGridRunner:
         directional_psi: torch.Tensor | None,
         hotspot_var: str | None,
         nlayers: int | None,
+        energy_options: EnergyBalanceOptions | None,
+        biochem_options: BiochemicalOptions | None,
         soil_heat_method: int,
     ) -> tuple[list[xr.Dataset], list[str]]:
         physiology_fields, energy_fields = self._energy_result_fields()
@@ -1642,8 +2024,8 @@ class ScopeGridRunner:
             )
             energy = self._solve_energy_batch(
                 inputs,
-                energy_options=None,
-                biochem_options=None,
+                energy_options=energy_options,
+                biochem_options=biochem_options,
             )
             current_layer_count = self._layer_count(
                 inputs.nlayers,
@@ -2207,6 +2589,64 @@ class ScopeGridRunner:
             return int(scope_options[name])
         value = data_module.dataset.attrs.get(name, default)
         return default if value is None else int(value)
+
+    def _scope_energy_options(
+        self,
+        data_module,
+        scope_options: Mapping[str, object] | None,
+        energy_options: EnergyBalanceOptions | None,
+    ) -> EnergyBalanceOptions | None:
+        if energy_options is not None:
+            return energy_options
+
+        attrs = dict(getattr(data_module.dataset, "attrs", {}))
+        if scope_options:
+            attrs.update(scope_options)
+
+        aliases = {
+            "max_iter": ("energy_max_iter", "max_iter"),
+            "max_energy_error": ("energy_max_energy_error", "max_energy_error"),
+            "fixed_iterations": ("energy_fixed_iterations", "fixed_iterations", "differentiable_energy_balance"),
+            "monin_obukhov": ("energy_monin_obukhov", "monin_obukhov"),
+            "initial_shaded_leaf_offset": (
+                "energy_initial_shaded_leaf_offset",
+                "initial_shaded_leaf_offset",
+            ),
+            "initial_sunlit_leaf_offset": (
+                "energy_initial_sunlit_leaf_offset",
+                "initial_sunlit_leaf_offset",
+            ),
+            "initial_soil_offset": ("energy_initial_soil_offset", "initial_soil_offset"),
+        }
+        values: dict[str, object] = {}
+        for field_name, field_aliases in aliases.items():
+            for alias in field_aliases:
+                if alias in attrs and attrs[alias] is not None:
+                    values[field_name] = attrs[alias]
+                    break
+        if not values:
+            return None
+
+        defaults = EnergyBalanceOptions()
+        return EnergyBalanceOptions(
+            max_iter=int(values.get("max_iter", defaults.max_iter)),
+            max_energy_error=float(values.get("max_energy_error", defaults.max_energy_error)),
+            fixed_iterations=self._as_bool(
+                values.get("fixed_iterations", defaults.fixed_iterations),
+                default=defaults.fixed_iterations,
+            ),
+            monin_obukhov=self._as_bool(
+                values.get("monin_obukhov", defaults.monin_obukhov),
+                default=defaults.monin_obukhov,
+            ),
+            initial_shaded_leaf_offset=float(
+                values.get("initial_shaded_leaf_offset", defaults.initial_shaded_leaf_offset)
+            ),
+            initial_sunlit_leaf_offset=float(
+                values.get("initial_sunlit_leaf_offset", defaults.initial_sunlit_leaf_offset)
+            ),
+            initial_soil_offset=float(values.get("initial_soil_offset", defaults.initial_soil_offset)),
+        )
 
     def _as_bool(self, value: object, *, default: bool) -> bool:
         if value is None:

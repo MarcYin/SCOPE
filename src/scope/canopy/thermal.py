@@ -105,7 +105,6 @@ class CanopyThermalRadianceModel:
         )
         return cls(reflectance)
 
-    @torch.inference_mode()
     def __call__(
         self,
         lai: torch.Tensor,

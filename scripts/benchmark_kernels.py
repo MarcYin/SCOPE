@@ -2,13 +2,14 @@ from __future__ import annotations
 
 import argparse
 import json
-import sys
 import statistics
+import sys
 import time
 import warnings
+from collections.abc import Callable
+from contextlib import suppress
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Callable, Optional
 
 import torch
 
@@ -18,7 +19,13 @@ if str(SRC_ROOT) not in sys.path:
     sys.path.insert(0, str(SRC_ROOT))
 
 from scope.biochem import LeafBiochemistryInputs, LeafBiochemistryModel, LeafMeteo
-from scope.canopy import CanopyFluorescenceModel, CanopyReflectanceModel, CanopyThermalRadianceModel, FourSAILModel, campbell_lidf
+from scope.canopy import (
+    CanopyFluorescenceModel,
+    CanopyReflectanceModel,
+    CanopyThermalRadianceModel,
+    FourSAILModel,
+    campbell_lidf,
+)
 from scope.spectral.fluspect import FluspectModel, LeafBioBatch, OptiPar, SpectralGrids
 
 DEFAULT_KERNELS = ("fluspect", "reflectance", "fluorescence", "thermal", "leaf_biochemistry")
@@ -327,10 +334,8 @@ def benchmark_kernel(
         result["compile_reason"] = "torch.compile is not available in this environment"
         return result
 
-    try:
+    with suppress(Exception):
         torch._dynamo.reset()  # type: ignore[attr-defined]
-    except Exception:
-        pass
 
     try:
         compiled_fn = torch.compile(fn, mode=compile_mode)
@@ -374,7 +379,7 @@ def benchmark_kernel(
     return result
 
 
-def parse_args(argv: Optional[list[str]] = None) -> argparse.Namespace:
+def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Benchmark core SCOPE kernels in eager or torch.compile mode.")
     parser.add_argument("--device", default="cpu", help="Execution device, e.g. cpu or cuda.")
     parser.add_argument("--dtype", default="float64", choices=("float32", "float64"))
@@ -395,27 +400,30 @@ def run_benchmarks(args: argparse.Namespace) -> dict[str, object]:
     if device.type == "cuda" and not torch.cuda.is_available():
         raise RuntimeError("CUDA was requested but is not available")
     dtype = _dtype_from_name(args.dtype)
+    previous_grad_state = torch.is_grad_enabled()
     torch.set_grad_enabled(False)
+    try:
+        context = build_context(batch=args.batch, device=device, dtype=dtype, fixture=args.fixture, nlayers=args.nlayers)
+        kernel_map = make_kernel_map(context)
+        kernel_names = [name.strip() for name in args.kernels.split(",") if name.strip()]
+        unknown = sorted(set(kernel_names) - set(kernel_map))
+        if unknown:
+            raise ValueError(f"Unknown kernels: {', '.join(unknown)}")
 
-    context = build_context(batch=args.batch, device=device, dtype=dtype, fixture=args.fixture, nlayers=args.nlayers)
-    kernel_map = make_kernel_map(context)
-    kernel_names = [name.strip() for name in args.kernels.split(",") if name.strip()]
-    unknown = sorted(set(kernel_names) - set(kernel_map))
-    if unknown:
-        raise ValueError(f"Unknown kernels: {', '.join(unknown)}")
-
-    results = {
-        name: benchmark_kernel(
-            name,
-            kernel_map[name],
-            mode=args.mode,
-            warmup=args.warmup,
-            iters=args.iters,
-            device=device,
-            compile_mode=args.compile_mode,
-        )
-        for name in kernel_names
-    }
+        results = {
+            name: benchmark_kernel(
+                name,
+                kernel_map[name],
+                mode=args.mode,
+                warmup=args.warmup,
+                iters=args.iters,
+                device=device,
+                compile_mode=args.compile_mode,
+            )
+            for name in kernel_names
+        }
+    finally:
+        torch.set_grad_enabled(previous_grad_state)
     return {
         "fixture": context.fixture,
         "device": str(device),
@@ -431,7 +439,7 @@ def run_benchmarks(args: argparse.Namespace) -> dict[str, object]:
     }
 
 
-def main(argv: Optional[list[str]] = None) -> dict[str, object]:
+def main(argv: list[str] | None = None) -> dict[str, object]:
     args = parse_args(argv)
     report = run_benchmarks(args)
     rendered = json.dumps(report, indent=2)

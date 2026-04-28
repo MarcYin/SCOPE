@@ -181,7 +181,6 @@ class CanopyReflectanceModel:
 
         raise KeyError("Provide either soil_refl, soil_spectrum, or BSM soil parameters")
 
-    @torch.inference_mode()
     def __call__(
         self,
         leafbio: LeafBioBatch,

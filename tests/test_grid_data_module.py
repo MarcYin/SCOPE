@@ -27,6 +27,29 @@ def test_grid_module_batches():
     assert batches[-1]["LAI"].ndim == 1
 
 
+def test_grid_module_batches_preserve_torch_backed_gradients():
+    times = pd.date_range("2020-06-01", periods=2, freq="h")
+    fqe = torch.linspace(0.01, 0.018, 8, dtype=torch.float64, requires_grad=True)
+    data = xr.Dataset(
+        {
+            "fqe": xr.Variable(("y", "x", "time"), fqe.reshape(2, 2, 2), fastpath=True),
+        },
+        coords={"y": np.arange(2), "x": np.arange(2), "time": times},
+    )
+    cfg = SimulationConfig(roi_bounds=(0, 0, 1, 1), start_time=times[0], end_time=times[-1], chunk_size=3)
+    module = ScopeGridDataModule(data, cfg, required_vars=["fqe"])
+
+    batches = list(module.iter_batches())
+    loss = sum(batch["fqe"].sum() for batch in batches)
+    loss.backward()
+
+    assert batches[0]["fqe"].requires_grad
+    assert batches[0]["fqe"].dtype == torch.float64
+    assert batches[0]["fqe"].grad_fn is not None
+    assert fqe.grad is not None
+    assert torch.allclose(fqe.grad, torch.ones_like(fqe))
+
+
 def test_grid_module_assemble_dataset_preserves_coords_and_attrs():
     times = pd.date_range("2020-06-01", periods=2, freq="h")
     x = np.arange(2)

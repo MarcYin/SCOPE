@@ -309,6 +309,103 @@ def _assert_coupled_runner_outputs_close(
     )
 
 
+def test_scope_grid_runner_run_scope_tensors_preserves_fqe_gradient():
+    device = torch.device("cpu")
+    dtype = torch.float64
+    runner, spectral = _build_execution_mode_runner(device=device, dtype=dtype)
+    fqe = torch.tensor(0.01, device=device, dtype=dtype, requires_grad=True)
+
+    outputs = runner.run_scope_tensors(
+        {
+            "Cab": torch.tensor(45.0, device=device, dtype=dtype),
+            "Cw": torch.tensor(0.01, device=device, dtype=dtype),
+            "Cdm": torch.tensor(0.012, device=device, dtype=dtype),
+            "fqe": fqe,
+            "LAI": torch.tensor(2.0, device=device, dtype=dtype),
+            "tts": torch.tensor(30.0, device=device, dtype=dtype),
+            "tto": torch.tensor(20.0, device=device, dtype=dtype),
+            "psi": torch.tensor(5.0, device=device, dtype=dtype),
+            "soil_refl": torch.full((spectral.wlP.numel(),), 0.2, device=device, dtype=dtype),
+            "excitation": torch.ones(spectral.wlE.numel(), device=device, dtype=dtype),
+        },
+        workflow="fluorescence",
+    )
+    loss = outputs["LoF_"].mean()
+    loss.backward()
+
+    assert outputs["LoF_"].grad_fn is not None
+    assert fqe.grad is not None
+    assert torch.isfinite(fqe.grad)
+    assert abs(float(fqe.grad)) > 0.0
+
+
+def test_scope_grid_runner_run_scope_dataset_return_tensors_preserves_fqe_gradient():
+    device = torch.device("cpu")
+    dtype = torch.float64
+    runner, spectral = _build_execution_mode_runner(device=device, dtype=dtype)
+    dataset = _build_execution_mode_dataset(spectral)
+    fqe = torch.tensor([0.010, 0.012, 0.014], device=device, dtype=dtype, requires_grad=True)
+    dataset["fqe"] = xr.Variable(("y", "x", "time"), fqe.reshape(1, 1, 3), fastpath=True)
+    module = _build_execution_mode_module(dataset, device=device, dtype=dtype, chunk_size=2)
+    varmap = {name: name for name in dataset.data_vars}
+
+    outputs = runner.run_scope_dataset(
+        module,
+        varmap=varmap,
+        scope_options={"calc_fluor": 1},
+        nlayers=4,
+        return_tensors=True,
+        detach=False,
+    )
+    loss = outputs["LoF_"].mean()
+    loss.backward()
+
+    assert outputs["LoF_"].grad_fn is not None
+    assert fqe.grad is not None
+    assert torch.isfinite(fqe.grad).all()
+    assert torch.any(torch.abs(fqe.grad) > 0)
+
+
+def test_scope_grid_runner_energy_balance_preserves_resistance_and_canopy_gradients():
+    device = torch.device("cpu")
+    dtype = torch.float64
+    runner, spectral = _build_execution_mode_runner(device=device, dtype=dtype)
+    dataset = _build_coupled_execution_mode_dataset(spectral)
+    optimised = {
+        "rss": torch.tensor([120.0, 125.0, 130.0], device=device, dtype=dtype, requires_grad=True),
+        "rbs": torch.tensor([12.0, 14.0, 16.0], device=device, dtype=dtype, requires_grad=True),
+        "Cd": torch.tensor([0.20, 0.22, 0.24], device=device, dtype=dtype, requires_grad=True),
+        "rwc": torch.tensor([0.50, 0.55, 0.60], device=device, dtype=dtype, requires_grad=True),
+    }
+    for name, tensor in optimised.items():
+        dataset[name] = xr.Variable(("y", "x", "time"), tensor.reshape(1, 1, 3), fastpath=True)
+
+    module = _build_execution_mode_module(dataset, device=device, dtype=dtype, chunk_size=3)
+    varmap = {name: name for name in dataset.data_vars}
+
+    outputs = runner.run_scope_dataset(
+        module,
+        varmap=varmap,
+        scope_options={
+            "calc_ebal": 1,
+            "energy_fixed_iterations": 1,
+            "energy_max_iter": 3,
+            "energy_max_energy_error": 1e30,
+        },
+        nlayers=4,
+        return_tensors=True,
+    )
+    loss = outputs["Htot"].mean() + outputs["lEtot"].mean() + outputs["Tsave"].mean()
+    loss.backward()
+
+    assert outputs["Htot"].grad_fn is not None
+    assert torch.all(outputs["counter"] == 3)
+    for tensor in optimised.values():
+        assert tensor.grad is not None
+        assert torch.isfinite(tensor.grad).all()
+        assert torch.any(torch.abs(tensor.grad) > 0)
+
+
 def test_scope_grid_runner_matches_manual():
     device = torch.device("cpu")
     dtype = torch.float64

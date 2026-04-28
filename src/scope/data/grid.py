@@ -28,9 +28,23 @@ class ScopeGridDataModule:
         return stacked
 
     def _to_tensor(self, data_array: xr.DataArray) -> torch.Tensor:
-        values = data_array.values
-        tensor = torch.as_tensor(values, dtype=self.config.dtype, device=self.config.torch_device())
-        if not tensor.isfinite().all():
+        missing_dims = [dim for dim in self.stack_dims if dim not in data_array.dims]
+        if missing_dims:
+            raise ValueError(f"Variable '{data_array.name}' is missing stack dimensions: {missing_dims}")
+
+        extra_dims = tuple(dim for dim in data_array.dims if dim not in self.stack_dims)
+        ordered_dims = (*self.stack_dims, *extra_dims)
+        raw = self._raw_array(data_array)
+
+        if isinstance(raw, torch.Tensor):
+            axis_order = tuple(data_array.dims.index(dim) for dim in ordered_dims)
+            tensor = raw.permute(axis_order).reshape(self.batch_size(), *self._extra_shape(data_array, extra_dims))
+        else:
+            values = data_array.transpose(*ordered_dims).data
+            tensor = torch.as_tensor(values, dtype=self.config.dtype, device=self.config.torch_device())
+            tensor = tensor.reshape(self.batch_size(), *self._extra_shape(data_array, extra_dims))
+
+        if tensor.is_floating_point() or tensor.is_complex():
             tensor = torch.nan_to_num(tensor, nan=0.0)
         return tensor
 
@@ -39,15 +53,38 @@ class ScopeGridDataModule:
             return value.detach().cpu().numpy()
         return np.asarray(value)
 
+    def _raw_array(self, data_array: xr.DataArray) -> object:
+        raw = getattr(data_array.variable, "_data", None)
+        if isinstance(raw, torch.Tensor):
+            return raw
+        return data_array.data
+
+    def _extra_shape(self, data_array: xr.DataArray, extra_dims: Sequence[str]) -> tuple[int, ...]:
+        return tuple(int(data_array.sizes[dim]) for dim in extra_dims)
+
+    def _stacked_batch_template(self) -> xr.Dataset:
+        coords: dict[str, object] = {}
+        for dim in self.stack_dims:
+            if dim in self.dataset.coords:
+                coords[dim] = self.dataset.coords[dim]
+            else:
+                coords[dim] = np.arange(self.dataset.sizes[dim])
+        return xr.Dataset(coords=coords).stack(batch=self.stack_dims)
+
     def batch_size(self) -> int:
-        return int(self._stack_dataset().sizes["batch"])
+        total = 1
+        for dim in self.stack_dims:
+            total *= int(self.dataset.sizes[dim])
+        return total
 
     def iter_batches(self) -> Iterable[Mapping[str, torch.Tensor]]:
-        stacked = self._stack_dataset()
-        total = stacked.sizes["batch"]
+        missing = [var for var in self.required_vars if var not in self.dataset]
+        if missing:
+            raise KeyError(f"Dataset missing required variables: {missing}")
+        tensors = {var: self._to_tensor(self.dataset[var]) for var in self.required_vars}
+        total = self.batch_size()
         for chunk in self.config.chunks(total):
-            batch = stacked.isel(batch=chunk)
-            yield {var: self._to_tensor(batch[var]) for var in self.required_vars}
+            yield {var: tensor[chunk] for var, tensor in tensors.items()}
 
     def assemble_dataset(
         self,
@@ -57,8 +94,8 @@ class ScopeGridDataModule:
         variable_coords: Mapping[str, torch.Tensor | np.ndarray | Sequence[float] | xr.DataArray] | None = None,
         attrs: Mapping[str, object] | None = None,
     ) -> xr.Dataset:
-        stacked = self._stack_dataset()
-        total = stacked.sizes["batch"]
+        stacked = self._stacked_batch_template()
+        total = self.batch_size()
         variable_dims = {} if variable_dims is None else dict(variable_dims)
         variable_coords = {} if variable_coords is None else dict(variable_coords)
 

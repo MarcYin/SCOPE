@@ -186,21 +186,20 @@ class FluspectModel:
 
         leafopt = LeafOptics(refl=refl, tran=tran, kChlrel=kChlrel, kCarrel=kCarrel)
 
-        if (fqe > 0).any():
-            Mb, Mf = self._fluorescence(
-                rho_core=rho_core,
-                tau_core=tau_core,
-                refl=refl,
-                tran=tran,
-                talf=talf,
-                r21=r21,
-                t21=t21,
-                kChlrel=kChlrel,
-                fqe=fqe,
-                phi=optipar.phi,
-            )
-            leafopt.Mb = Mb
-            leafopt.Mf = Mf
+        Mb, Mf = self._fluorescence(
+            rho_core=rho_core,
+            tau_core=tau_core,
+            refl=refl,
+            tran=tran,
+            talf=talf,
+            r21=r21,
+            t21=t21,
+            kChlrel=kChlrel,
+            fqe=fqe,
+            phi=optipar.phi,
+        )
+        leafopt.Mb = Mb
+        leafopt.Mf = Mf
 
         return leafopt
 

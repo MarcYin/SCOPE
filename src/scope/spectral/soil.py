@@ -102,7 +102,6 @@ class SoilBSMModel:
         )
         return cls.from_resources(resources, empirical=empirical, device=device, dtype=dtype)
 
-    @torch.inference_mode()
     def __call__(self, soil: BSMSoilParameters) -> torch.Tensor:
         _, params = self._prepare_soil(soil)
         smc = self._normalize_soil_moisture(params["SMC"])
