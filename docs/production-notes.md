@@ -64,6 +64,30 @@ The current recommendation is:
 
 On the current reference CPU environment, `fluspect` and canopy `reflectance` benefit in steady state, `thermal` only pays off after a much larger number of calls, layered `fluorescence` currently fails under `torch.compile`, and leaf biochemistry currently regresses because scalar root-solving logic still causes graph breaks and recompilation churn.
 
+## Autograd and Chunking
+
+`chunk_size` slices SCOPE forward execution. For inference, export, or detached dataset assembly, that bounds the amount of model work done in one forward call.
+
+For gradient-based optimisation, slicing the forward pass is not enough by itself. If code collects all chunk outputs, concatenates them, computes one full-batch loss, and calls `loss.backward()` once, PyTorch must retain every chunk's intermediate graph until that backward pass finishes. In that pattern, `chunk_size` improves scheduling and per-forward temporary allocations, but it does not make activation memory scale with the chunk size.
+
+The memory-oriented autograd pattern is to stream chunks and backpropagate each chunk loss before keeping the next chunk output:
+
+```python
+optim_tensor.grad = None
+total_loss = 0.0
+
+for outputs in runner.iter_scope_dataset_tensors(
+    data_module,
+    varmap=varmap,
+    scope_options=scope_options,
+):
+    chunk_loss = loss_fn(outputs)
+    chunk_loss.backward()
+    total_loss += float(chunk_loss.detach())
+```
+
+For direct tensor inputs, use `runner.iter_scope_tensors(...)` the same way. If the objective is a global mean or sum, weight each chunk loss by its contribution to the full objective before calling `backward()`. Avoid storing chunk outputs that still have `grad_fn`; keeping those tensors alive also keeps their graphs alive.
+
 ## Release and Distribution
 
 For maintainers, the repository now has separate operational paths for packaging and docs deployment:

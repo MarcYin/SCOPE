@@ -27,7 +27,7 @@ class ScopeGridDataModule:
         stacked = self.dataset[self.required_vars].stack(batch=self.stack_dims).transpose("batch", ...)
         return stacked
 
-    def _to_tensor(self, data_array: xr.DataArray) -> torch.Tensor:
+    def _to_tensor(self, data_array: xr.DataArray, *, chunk: slice | None = None) -> torch.Tensor:
         missing_dims = [dim for dim in self.stack_dims if dim not in data_array.dims]
         if missing_dims:
             raise ValueError(f"Variable '{data_array.name}' is missing stack dimensions: {missing_dims}")
@@ -37,6 +37,7 @@ class ScopeGridDataModule:
         raw = self._raw_array(data_array)
 
         if isinstance(raw, torch.Tensor):
+            raw = self._fresh_autograd_view(raw)
             axis_order = tuple(data_array.dims.index(dim) for dim in ordered_dims)
             tensor = raw.permute(axis_order).reshape(self.batch_size(), *self._extra_shape(data_array, extra_dims))
         else:
@@ -44,6 +45,8 @@ class ScopeGridDataModule:
             tensor = torch.as_tensor(values, dtype=self.config.dtype, device=self.config.torch_device())
             tensor = tensor.reshape(self.batch_size(), *self._extra_shape(data_array, extra_dims))
 
+        if chunk is not None:
+            tensor = tensor[chunk]
         if tensor.is_floating_point() or tensor.is_complex():
             tensor = torch.nan_to_num(tensor, nan=0.0)
         return tensor
@@ -58,6 +61,21 @@ class ScopeGridDataModule:
         if isinstance(raw, torch.Tensor):
             return raw
         return data_array.data
+
+    def _fresh_autograd_view(self, tensor: torch.Tensor) -> torch.Tensor:
+        if not tensor.requires_grad or tensor.is_leaf:
+            return tensor
+
+        base = tensor
+        while isinstance(getattr(base, "_base", None), torch.Tensor):
+            base = base._base
+        if base is tensor:
+            return tensor
+        return base.as_strided(tensor.shape, tensor.stride(), tensor.storage_offset())
+
+    def _carries_grad(self, data_array: xr.DataArray) -> bool:
+        raw = getattr(data_array.variable, "_data", None)
+        return isinstance(raw, torch.Tensor) and raw.requires_grad
 
     def _extra_shape(self, data_array: xr.DataArray, extra_dims: Sequence[str]) -> tuple[int, ...]:
         return tuple(int(data_array.sizes[dim]) for dim in extra_dims)
@@ -81,10 +99,17 @@ class ScopeGridDataModule:
         missing = [var for var in self.required_vars if var not in self.dataset]
         if missing:
             raise KeyError(f"Dataset missing required variables: {missing}")
-        tensors = {var: self._to_tensor(self.dataset[var]) for var in self.required_vars}
+        cached = {
+            var: self._to_tensor(self.dataset[var])
+            for var in self.required_vars
+            if not self._carries_grad(self.dataset[var])
+        }
         total = self.batch_size()
         for chunk in self.config.chunks(total):
-            yield {var: tensor[chunk] for var, tensor in tensors.items()}
+            yield {
+                var: cached[var][chunk] if var in cached else self._to_tensor(self.dataset[var], chunk=chunk)
+                for var in self.required_vars
+            }
 
     def assemble_dataset(
         self,

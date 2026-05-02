@@ -151,6 +151,7 @@ class _TensorBatchDataModule:
         )
 
     def _chunk_tensor(self, name: str, tensor: torch.Tensor, chunk: slice) -> torch.Tensor:
+        tensor = self._fresh_autograd_view(tensor)
         if self._is_non_batch_tensor(name, tensor):
             return tensor
         if tensor.ndim == 0:
@@ -167,6 +168,17 @@ class _TensorBatchDataModule:
 
     def _is_non_batch_tensor(self, name: str, tensor: torch.Tensor) -> bool:
         return name in self._non_batch_vars or (name in self._non_batch_1d_vars and tensor.ndim == 1)
+
+    def _fresh_autograd_view(self, tensor: torch.Tensor) -> torch.Tensor:
+        if not tensor.requires_grad or tensor.is_leaf:
+            return tensor
+
+        base = tensor
+        while isinstance(getattr(base, "_base", None), torch.Tensor):
+            base = base._base
+        if base is tensor:
+            return tensor
+        return base.as_strided(tensor.shape, tensor.stride(), tensor.storage_offset())
 
 
 class ScopeGridRunner:
@@ -1469,8 +1481,12 @@ class ScopeGridRunner:
     ) -> dict[str, torch.Tensor]:
         """Run a SCOPE workflow directly on tensors without xarray assembly.
 
-        Direct tensor execution is chunked by default to cap peak model memory. Set
-        ``chunk_size=None`` to run the entire tensor batch in one forward pass.
+        Direct tensor execution slices forward passes by default, then concatenates
+        returned tensors. Under autograd, those concatenated outputs still retain
+        every chunk graph until backward completes. Use ``iter_scope_tensors`` and
+        call backward on each chunk loss when peak autograd memory matters.
+
+        Set ``chunk_size=None`` to run the entire tensor batch in one forward pass.
         """
 
         tensor_inputs = self._normalise_tensor_inputs(inputs)
@@ -1521,7 +1537,13 @@ class ScopeGridRunner:
         chunk_size: int | None = 1024,
         batch_size: int | None = None,
     ) -> Iterable[dict[str, torch.Tensor]]:
-        """Yield tensor-preserving SCOPE outputs one input chunk at a time."""
+        """Yield tensor-preserving SCOPE outputs one input chunk at a time.
+
+        For large autograd workloads, compute the chunk loss and call
+        ``loss.backward()`` before storing or advancing past the chunk output. That
+        lets PyTorch release each chunk graph instead of retaining the full batch
+        graph for one later backward pass.
+        """
 
         tensor_inputs = self._normalise_tensor_inputs(inputs)
         resolved_varmap = dict(varmap or {name: name for name in tensor_inputs})
@@ -1576,7 +1598,12 @@ class ScopeGridRunner:
         nlayers: int | None = None,
         detach: bool = False,
     ) -> Iterable[dict[str, torch.Tensor]]:
-        """Yield ``run_scope_dataset(..., return_tensors=True)`` outputs per configured chunk."""
+        """Yield ``run_scope_dataset(..., return_tensors=True)`` outputs per configured chunk.
+
+        This is the memory-oriented autograd path for grid datasets: compute and
+        backpropagate a per-chunk loss while iterating instead of concatenating all
+        tensor outputs first.
+        """
 
         if self._scope_option_flag(data_module, scope_options, "calc_directional"):
             directional_tto, directional_psi = self._directional_angles(

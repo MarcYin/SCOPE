@@ -358,16 +358,18 @@ def test_scope_grid_runner_run_scope_tensors_chunks_batched_inputs_and_preserves
         "excitation": torch.ones(spectral.wlE.numel(), device=device, dtype=dtype),
     }
 
-    unchunked = runner.run_scope_tensors(inputs, workflow="fluorescence", chunk_size=None)
-    chunked = runner.run_scope_tensors(inputs, workflow="fluorescence", chunk_size=2)
+    with torch.no_grad():
+        unchunked = runner.run_scope_tensors(inputs, workflow="fluorescence", chunk_size=None)
+        chunked = runner.run_scope_tensors(inputs, workflow="fluorescence", chunk_size=2)
     assert torch.allclose(chunked["LoF_"], unchunked["LoF_"])
 
-    chunks = list(runner.iter_scope_tensors(inputs, workflow="fluorescence", chunk_size=2))
-    assert [chunk["LoF_"].shape[0] for chunk in chunks] == [2, 2, 1]
+    observed_sizes = []
+    for chunk in runner.iter_scope_tensors(inputs, workflow="fluorescence", chunk_size=2):
+        observed_sizes.append(chunk["LoF_"].shape[0])
+        chunk_loss = chunk["LoF_"].sum() / (batch * chunk["LoF_"].shape[1])
+        chunk_loss.backward()
 
-    loss = sum(chunk["LoF_"].mean() for chunk in chunks)
-    loss.backward()
-
+    assert observed_sizes == [2, 2, 1]
     assert fqe.grad is not None
     assert torch.isfinite(fqe.grad).all()
     assert torch.any(torch.abs(fqe.grad) > 0)
@@ -410,22 +412,45 @@ def test_scope_grid_runner_iter_scope_dataset_tensors_streams_configured_chunks(
     module = _build_execution_mode_module(dataset, device=device, dtype=dtype, chunk_size=2)
     varmap = {name: name for name in dataset.data_vars}
 
+    observed_sizes = []
+    for chunk in runner.iter_scope_dataset_tensors(
+        module,
+        varmap=varmap,
+        scope_options={"calc_fluor": 1},
+        nlayers=4,
+    ):
+        observed_sizes.append(chunk["LoF_"].shape[0])
+        chunk_loss = chunk["LoF_"].sum() / (module.batch_size() * chunk["LoF_"].shape[1])
+        chunk_loss.backward()
+
+    assert observed_sizes == [2, 1]
+    assert fqe.grad is not None
+    assert torch.isfinite(fqe.grad).all()
+    assert torch.any(torch.abs(fqe.grad) > 0)
+
+
+def test_scope_grid_runner_iter_scope_dataset_tensors_detaches_chunk_outputs():
+    device = torch.device("cpu")
+    dtype = torch.float64
+    runner, spectral = _build_execution_mode_runner(device=device, dtype=dtype)
+    dataset = _build_execution_mode_dataset(spectral)
+    fqe = torch.tensor([0.010, 0.012, 0.014], device=device, dtype=dtype, requires_grad=True)
+    dataset["fqe"] = xr.Variable(("y", "x", "time"), fqe.reshape(1, 1, 3), fastpath=True)
+    module = _build_execution_mode_module(dataset, device=device, dtype=dtype, chunk_size=2)
+    varmap = {name: name for name in dataset.data_vars}
+
     chunks = list(
         runner.iter_scope_dataset_tensors(
             module,
             varmap=varmap,
             scope_options={"calc_fluor": 1},
             nlayers=4,
+            detach=True,
         )
     )
+
     assert [chunk["LoF_"].shape[0] for chunk in chunks] == [2, 1]
-
-    loss = sum(chunk["LoF_"].mean() for chunk in chunks)
-    loss.backward()
-
-    assert fqe.grad is not None
-    assert torch.isfinite(fqe.grad).all()
-    assert torch.any(torch.abs(fqe.grad) > 0)
+    assert all(chunk["LoF_"].grad_fn is None for chunk in chunks)
 
 
 def test_scope_grid_runner_energy_balance_preserves_resistance_and_canopy_gradients():
