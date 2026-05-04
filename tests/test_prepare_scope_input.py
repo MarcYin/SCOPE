@@ -95,6 +95,20 @@ def test_derive_observation_time_grid_drops_missing_delta_time():
     ]
 
 
+def test_derive_observation_time_grid_avoids_int64_overflow_for_tiled_datetimes():
+    times = pd.date_range("2020-06-01", periods=1, freq="h")
+    timestamp = np.datetime64("2020-06-01T00:00:00", "ns")
+    values = np.full((3, 3, 1), timestamp, dtype="datetime64[ns]")
+    observation = xr.Dataset(
+        {"delta_time": (("y", "x", "time"), values)},
+        coords={"y": np.arange(3), "x": np.arange(3), "time": times},
+    )
+
+    time_grid = derive_observation_time_grid(observation)
+
+    assert pd.DatetimeIndex(time_grid.values).tolist() == [pd.Timestamp(timestamp)]
+
+
 def test_prepare_scope_input_dataset_builds_runner_ready_dataset():
     weather_times = pd.date_range("2020-06-01", periods=3, freq="h")
     observation_times = pd.date_range("2020-06-01", periods=3, freq="h")

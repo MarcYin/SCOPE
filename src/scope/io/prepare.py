@@ -67,6 +67,7 @@ DEFAULT_SCOPE_OPTIONS = {
     "MoninObukhov": 1,
     "save_spectral": 0,
 }
+_NAT_INT64 = np.iinfo(np.int64).min
 
 
 @dataclass(slots=True)
@@ -158,15 +159,15 @@ def derive_observation_time_grid(
     reduce_dims = [dim for dim in spatial_dims if dim in delta_time.dims]
     if np.issubdtype(delta_time.dtype, np.datetime64):
         mean_numeric = _integer_time_mean(delta_time, reduce_dims, dtype="datetime64[ns]")
-        mean_numeric = _drop_null_along_primary_dim(mean_numeric)
         values = np.asarray(mean_numeric.values, dtype=np.int64).astype("datetime64[ns]")
-        return xr.DataArray(values, dims=mean_numeric.dims, coords=mean_numeric.coords, name="time")
+        time_grid = xr.DataArray(values, dims=mean_numeric.dims, coords=mean_numeric.coords, name="time")
+        return _drop_null_along_primary_dim(time_grid)
 
     if np.issubdtype(delta_time.dtype, np.timedelta64):
         mean_numeric = _integer_time_mean(delta_time, reduce_dims, dtype="timedelta64[ns]")
-        mean_numeric = _drop_null_along_primary_dim(mean_numeric)
         values = np.asarray(mean_numeric.values, dtype=np.int64).astype("timedelta64[ns]")
-        return xr.DataArray(values, dims=mean_numeric.dims, coords=mean_numeric.coords, name="time")
+        time_grid = xr.DataArray(values, dims=mean_numeric.dims, coords=mean_numeric.coords, name="time")
+        return _drop_null_along_primary_dim(time_grid)
 
     time_grid = delta_time.mean(dim=reduce_dims, skipna=True)
     return _drop_null_along_primary_dim(time_grid).rename("time")
@@ -357,15 +358,18 @@ def _drop_null_along_primary_dim(data: xr.DataArray) -> xr.DataArray:
 def _integer_time_mean(delta_time: xr.DataArray, reduce_dims: Sequence[str], *, dtype: str) -> xr.DataArray:
     valid = delta_time.notnull()
     numeric = xr.where(valid, delta_time.astype(dtype).astype(np.int64), 0)
-    if reduce_dims:
-        summed = numeric.sum(dim=reduce_dims, skipna=False)
-        counts = valid.sum(dim=reduce_dims)
-    else:
-        summed = numeric
+    if not reduce_dims:
         counts = valid.astype(np.int64)
+        return numeric.where(counts > 0, other=_NAT_INT64)
+
+    counts = valid.sum(dim=reduce_dims)
     counts_safe = xr.where(counts > 0, counts, 1)
-    mean_numeric = (summed + counts_safe // 2) // counts_safe
-    return mean_numeric.where(counts > 0)
+    quotients = xr.where(valid, numeric // counts_safe, 0)
+    remainders = xr.where(valid, numeric % counts_safe, 0)
+    summed_quotients = quotients.sum(dim=reduce_dims, skipna=False)
+    summed_remainders = remainders.sum(dim=reduce_dims, skipna=False)
+    mean_numeric = summed_quotients + (summed_remainders + counts_safe // 2) // counts_safe
+    return mean_numeric.where(counts > 0, other=_NAT_INT64)
 
 
 def _spatial_target(data: xr.DataArray) -> xr.DataArray:
