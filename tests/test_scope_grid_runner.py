@@ -375,6 +375,83 @@ def test_scope_grid_runner_run_scope_tensors_chunks_batched_inputs_and_preserves
     assert torch.any(torch.abs(fqe.grad) > 0)
 
 
+def test_scope_grid_runner_run_scope_tensors_output_vars_filters_and_detaches_to_cpu():
+    device = torch.device("cpu")
+    dtype = torch.float64
+    runner, spectral = _build_execution_mode_runner(device=device, dtype=dtype)
+    batch = 3
+    fqe = torch.linspace(0.010, 0.014, batch, device=device, dtype=dtype, requires_grad=True)
+    inputs = {
+        "Cab": torch.linspace(45.0, 38.0, batch, device=device, dtype=dtype),
+        "Cw": torch.linspace(0.010, 0.014, batch, device=device, dtype=dtype),
+        "Cdm": torch.linspace(0.012, 0.016, batch, device=device, dtype=dtype),
+        "fqe": fqe,
+        "LAI": torch.linspace(2.0, 3.0, batch, device=device, dtype=dtype),
+        "tts": torch.linspace(30.0, 38.0, batch, device=device, dtype=dtype),
+        "tto": torch.linspace(12.0, 24.0, batch, device=device, dtype=dtype),
+        "psi": torch.linspace(5.0, 35.0, batch, device=device, dtype=dtype),
+        "soil_refl": torch.full((batch, spectral.wlP.numel()), 0.2, device=device, dtype=dtype),
+        "excitation": torch.ones(spectral.wlE.numel(), device=device, dtype=dtype),
+    }
+
+    outputs = runner.run_scope_tensors(
+        inputs,
+        workflow="fluorescence",
+        chunk_size=2,
+        output_vars=("LoF_",),
+        output_device="cpu",
+        detach=True,
+    )
+
+    assert set(outputs) == {"LoF_"}
+    assert outputs["LoF_"].device.type == "cpu"
+    assert outputs["LoF_"].grad_fn is None
+
+
+def test_scope_grid_runner_run_scope_tensors_rejects_unknown_output_var():
+    device = torch.device("cpu")
+    dtype = torch.float64
+    runner, spectral = _build_execution_mode_runner(device=device, dtype=dtype)
+
+    with pytest.raises(KeyError, match="Requested output variables"):
+        runner.run_scope_tensors(
+            {
+                "Cab": torch.tensor(45.0, device=device, dtype=dtype),
+                "Cw": torch.tensor(0.01, device=device, dtype=dtype),
+                "Cdm": torch.tensor(0.012, device=device, dtype=dtype),
+                "fqe": torch.tensor(0.01, device=device, dtype=dtype),
+                "LAI": torch.tensor(2.0, device=device, dtype=dtype),
+                "tts": torch.tensor(30.0, device=device, dtype=dtype),
+                "tto": torch.tensor(20.0, device=device, dtype=dtype),
+                "psi": torch.tensor(5.0, device=device, dtype=dtype),
+                "soil_refl": torch.full((spectral.wlP.numel(),), 0.2, device=device, dtype=dtype),
+                "excitation": torch.ones(spectral.wlE.numel(), device=device, dtype=dtype),
+            },
+            workflow="fluorescence",
+            output_vars=("not_an_output",),
+        )
+
+
+def test_scope_grid_runner_run_scope_dataset_output_vars_keeps_requested_variables_only():
+    device = torch.device("cpu")
+    dtype = torch.float64
+    runner, spectral = _build_execution_mode_runner(device=device, dtype=dtype)
+    dataset = _build_execution_mode_dataset(spectral)
+    module = _build_execution_mode_module(dataset, device=device, dtype=dtype, chunk_size=2)
+    varmap = {name: name for name in dataset.data_vars}
+
+    outputs = runner.run_scope_dataset(
+        module,
+        varmap=varmap,
+        scope_options={"calc_fluor": 1},
+        nlayers=4,
+        output_vars=("LoF_",),
+    )
+
+    assert set(outputs.data_vars) == {"LoF_"}
+    assert outputs["LoF_"].dims == ("y", "x", "time", "fluorescence_wavelength")
+
+
 def test_scope_grid_runner_run_scope_dataset_return_tensors_preserves_fqe_gradient():
     device = torch.device("cpu")
     dtype = torch.float64

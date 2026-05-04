@@ -53,6 +53,12 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--device", default="cpu", help="Torch device for execution.")
     parser.add_argument("--dtype", choices=("float32", "float64"), default="float32", help="Torch dtype for execution.")
     parser.add_argument("--chunk-size", type=int, default=1024, help="Batch chunk size for ROI/time execution.")
+    parser.add_argument(
+        "--output-var",
+        action="append",
+        dest="output_vars",
+        help="Output variable to keep. Repeat to write a subset instead of every workflow output.",
+    )
     parser.add_argument("--lidfa", type=float, default=57.0, help="Campbell mean leaf angle used to build the LIDF.")
     parser.add_argument(
         "--default-hotspot", type=float, default=0.2, help="Fallback hotspot value when no hotspot variable is present."
@@ -155,6 +161,9 @@ def _run_workflow(args: argparse.Namespace, runner: ScopeGridRunner, data_module
     method_name = _WORKFLOW_RUNNERS[workflow]
     method: Callable[..., xr.Dataset] = getattr(runner, method_name)
     kwargs: dict[str, object] = {"varmap": varmap}
+    output_vars = getattr(args, "output_vars", None)
+    if output_vars:
+        kwargs["output_vars"] = tuple(output_vars)
 
     if workflow == "scope":
         scope_options = {

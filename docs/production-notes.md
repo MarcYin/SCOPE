@@ -68,6 +68,8 @@ On the current reference CPU environment, `fluspect` and canopy `reflectance` be
 
 `chunk_size` slices SCOPE forward execution. For inference, export, or detached dataset assembly, that bounds the amount of model work done in one forward call.
 
+Dataset assembly detaches each selected chunk and moves it to CPU before concatenating outputs, so non-autograd runs do not keep all completed chunks resident on the model device. Use `output_vars=(...)` on runner calls, or repeat `--output-var` in the CLI, when only a subset of variables is needed.
+
 For gradient-based optimisation, slicing the forward pass is not enough by itself. If code collects all chunk outputs, concatenates them, computes one full-batch loss, and calls `loss.backward()` once, PyTorch must retain every chunk's intermediate graph until that backward pass finishes. In that pattern, `chunk_size` improves scheduling and per-forward temporary allocations, but it does not make activation memory scale with the chunk size.
 
 The memory-oriented autograd pattern is to stream chunks and backpropagate each chunk loss before keeping the next chunk output:

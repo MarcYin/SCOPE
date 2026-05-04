@@ -168,6 +168,7 @@ Recommended usage:
 
 - keep the prepared dataset attrs as the default workflow intent
 - use explicit `scope_options=...` only when you need to override them at runtime
+- use `output_vars=(...)` to assemble only selected output variables; prefixed workflow names such as `fluorescence_directional_LoF_` match the final dataset variable names
 - when `calc_ebal=1`, `calc_fluor` and `calc_planck` dispatch to the coupled energy-balance fluorescence / thermal paths rather than the standalone `Esun_/Esky_` or `Tcu/Tch/Tsu/Tsh` inputs
 
 ## Output Naming Conventions

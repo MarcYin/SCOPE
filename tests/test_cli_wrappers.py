@@ -254,9 +254,45 @@ def test_scope_run_workflow_forwards_soil_heat_method_into_scope_options() -> No
         calc_vert_profiles=None,
         soil_heat_method=4,
         nlayers=None,
+        output_vars=None,
     )
 
     run_cli._run_workflow(args, runner, data_module)
 
     assert runner.kwargs is not None
     assert runner.kwargs["scope_options"] == {"calc_ebal": 1, "soil_heat_method": 4}
+
+
+def test_scope_run_workflow_forwards_output_vars() -> None:
+    class _RunnerProbe:
+        def __init__(self) -> None:
+            self.kwargs: dict[str, object] | None = None
+
+        def run_dataset(self, data_module: object, **kwargs: object) -> xr.Dataset:
+            self.kwargs = kwargs
+            return xr.Dataset()
+
+    runner = _RunnerProbe()
+    dataset = xr.Dataset(
+        {
+            "Cab": (("y", "x", "time"), np.array([[[45.0]]])),
+        },
+        coords={"y": [0], "x": [0], "time": pd.date_range("2020-07-01T12:00:00", periods=1, freq="h")},
+    )
+    data_module = type("_DataModuleProbe", (), {"dataset": dataset})()
+    args = argparse.Namespace(
+        workflow="reflectance",
+        calc_ebal=None,
+        calc_fluor=None,
+        calc_planck=None,
+        calc_directional=None,
+        calc_vert_profiles=None,
+        soil_heat_method=None,
+        nlayers=None,
+        output_vars=["rsot", "rso"],
+    )
+
+    run_cli._run_workflow(args, runner, data_module)
+
+    assert runner.kwargs is not None
+    assert runner.kwargs["output_vars"] == ("rsot", "rso")

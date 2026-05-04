@@ -156,6 +156,8 @@ scope run \
   --workflow reflectance
 ```
 
+Repeat `--output-var` to write only selected output variables for large runs.
+
 ## Main Entry Points
 
 For most users, the preferred entry points are:

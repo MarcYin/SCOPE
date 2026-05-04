@@ -98,6 +98,13 @@ class _EnergyBatchInputs:
     Tsh0: torch.Tensor | None
 
 
+@dataclass(frozen=True, slots=True)
+class _OutputAssemblyOptions:
+    output_vars: frozenset[str] | None = None
+    output_device: torch.device | None = None
+    detach: bool = False
+
+
 class _TensorBatchDataModule:
     def __init__(
         self,
@@ -273,8 +280,16 @@ class ScopeGridRunner:
         varmap: Mapping[str, str],
         hotspot_var: str | None = None,
         nlayers: int | None = None,
+        output_vars: Sequence[str] | None = None,
+        output_device: torch.device | str | None = None,
+        detach_outputs: bool = False,
     ) -> dict[str, torch.Tensor]:
-        outputs: dict[str, list[torch.Tensor]] = {name: [] for name in CanopyReflectanceResult.__dataclass_fields__}
+        assembly = self._output_assembly_options(
+            output_vars=output_vars,
+            output_device=output_device,
+            detach_outputs=detach_outputs,
+        )
+        outputs = self._empty_outputs(CanopyReflectanceResult.__dataclass_fields__, assembly)
         for batch in _progress(data_module.iter_batches(), desc="reflectance"):
             leaf_kwargs = self._leafbio_kwargs(batch, varmap)
             leafbio = LeafBioBatch(**leaf_kwargs)
@@ -299,9 +314,9 @@ class ScopeGridRunner:
                 nlayers=self._layer_count(nlayers, etau=None, etah=None, Tcu=None, Tch=None),
             )
             for name in outputs:
-                outputs[name].append(getattr(result, name))
+                self._append_output(outputs, name, getattr(result, name), assembly)
 
-        return {name: torch.cat(chunks, dim=0) for name, chunks in outputs.items()}
+        return self._concat_outputs(outputs)
 
     def run_dataset(
         self,
@@ -310,12 +325,16 @@ class ScopeGridRunner:
         varmap: Mapping[str, str],
         hotspot_var: str | None = None,
         nlayers: int | None = None,
+        output_vars: Sequence[str] | None = None,
     ) -> xr.Dataset:
         outputs = self.run(
             data_module,
             varmap=varmap,
             hotspot_var=hotspot_var,
             nlayers=nlayers,
+            output_vars=output_vars,
+            output_device="cpu",
+            detach_outputs=True,
         )
         return self._outputs_to_dataset(data_module, outputs, product="reflectance")
 
@@ -328,8 +347,16 @@ class ScopeGridRunner:
         directional_psi: torch.Tensor | None = None,
         hotspot_var: str | None = None,
         nlayers: int | None = None,
+        output_vars: Sequence[str] | None = None,
+        output_device: torch.device | str | None = None,
+        detach_outputs: bool = False,
     ) -> dict[str, torch.Tensor]:
-        outputs: dict[str, list[torch.Tensor]] = {name: [] for name in ("refl_", "rso_")}
+        assembly = self._output_assembly_options(
+            output_vars=output_vars,
+            output_device=output_device,
+            detach_outputs=detach_outputs,
+        )
+        outputs = self._empty_outputs(("refl_", "rso_"), assembly)
         tto_angles, psi_angles = self._directional_angles(
             data_module,
             varmap=varmap,
@@ -361,10 +388,10 @@ class ScopeGridRunner:
                 hotspot=hotspot,
                 nlayers=self._layer_count(nlayers, etau=None, etah=None, Tcu=None, Tch=None),
             )
-            outputs["refl_"].append(result.refl_)
-            outputs["rso_"].append(result.rso_)
+            self._append_output(outputs, "refl_", result.refl_, assembly)
+            self._append_output(outputs, "rso_", result.rso_, assembly)
 
-        return {name: torch.cat(chunks, dim=0) for name, chunks in outputs.items()}
+        return self._concat_outputs(outputs)
 
     def run_directional_reflectance_dataset(
         self,
@@ -375,6 +402,7 @@ class ScopeGridRunner:
         directional_psi: torch.Tensor | None = None,
         hotspot_var: str | None = None,
         nlayers: int | None = None,
+        output_vars: Sequence[str] | None = None,
     ) -> xr.Dataset:
         tto_angles, psi_angles = self._directional_angles(
             data_module,
@@ -389,6 +417,9 @@ class ScopeGridRunner:
             directional_psi=psi_angles,
             hotspot_var=hotspot_var,
             nlayers=nlayers,
+            output_vars=output_vars,
+            output_device="cpu",
+            detach_outputs=True,
         )
         return self._directional_outputs_to_dataset(
             data_module,
@@ -406,10 +437,16 @@ class ScopeGridRunner:
         varmap: Mapping[str, str],
         hotspot_var: str | None = None,
         nlayers: int | None = None,
+        output_vars: Sequence[str] | None = None,
+        output_device: torch.device | str | None = None,
+        detach_outputs: bool = False,
     ) -> dict[str, torch.Tensor]:
-        outputs: dict[str, list[torch.Tensor]] = {
-            name: [] for name in CanopyRadiationProfileResult.__dataclass_fields__
-        }
+        assembly = self._output_assembly_options(
+            output_vars=output_vars,
+            output_device=output_device,
+            detach_outputs=detach_outputs,
+        )
+        outputs = self._empty_outputs(CanopyRadiationProfileResult.__dataclass_fields__, assembly)
         expected_layer_count: int | None = None
         for batch in _progress(data_module.iter_batches(), desc="reflectance-profiles"):
             leaf_kwargs = self._leafbio_kwargs(batch, varmap)
@@ -440,9 +477,9 @@ class ScopeGridRunner:
             )
             expected_layer_count = self._accumulate_profile_layer_count(expected_layer_count, result.Ps)
             for name in outputs:
-                outputs[name].append(getattr(result, name))
+                self._append_output(outputs, name, getattr(result, name), assembly)
 
-        return {name: torch.cat(chunks, dim=0) for name, chunks in outputs.items()}
+        return self._concat_outputs(outputs)
 
     def run_reflectance_profiles_dataset(
         self,
@@ -451,18 +488,22 @@ class ScopeGridRunner:
         varmap: Mapping[str, str],
         hotspot_var: str | None = None,
         nlayers: int | None = None,
+        output_vars: Sequence[str] | None = None,
     ) -> xr.Dataset:
         outputs = self.run_reflectance_profiles(
             data_module,
             varmap=varmap,
             hotspot_var=hotspot_var,
             nlayers=nlayers,
+            output_vars=output_vars,
+            output_device="cpu",
+            detach_outputs=True,
         )
         return self._profile_outputs_to_dataset(
             data_module,
             outputs,
             product="reflectance_profiles",
-            layer_count=self._profile_layer_count_from_tensor(outputs["Ps"]),
+            layer_count=self._profile_layer_count_from_outputs(data_module, outputs),
             variable_dims={
                 "Ps": ("layer_interface",),
                 "Po": ("layer_interface",),
@@ -487,15 +528,24 @@ class ScopeGridRunner:
         biochem_options: BiochemicalOptions | None = None,
         hotspot_var: str | None = None,
         nlayers: int | None = None,
+        output_vars: Sequence[str] | None = None,
+        output_device: torch.device | str | None = None,
+        detach_outputs: bool = False,
     ) -> dict[str, torch.Tensor]:
         physiology_fields = [name for name in LeafBiochemistryResult.__dataclass_fields__ if name != "fcount"]
-        outputs: dict[str, list[torch.Tensor]] = {
-            **{name: [] for name in CanopyFluorescenceResult.__dataclass_fields__},
-            "Pnu_Cab": [],
-            "Pnh_Cab": [],
-            **{f"sunlit_{name}": [] for name in physiology_fields},
-            **{f"shaded_{name}": [] for name in physiology_fields},
-        }
+        available_outputs = (
+            *CanopyFluorescenceResult.__dataclass_fields__,
+            "Pnu_Cab",
+            "Pnh_Cab",
+            *(f"sunlit_{name}" for name in physiology_fields),
+            *(f"shaded_{name}" for name in physiology_fields),
+        )
+        assembly = self._output_assembly_options(
+            output_vars=output_vars,
+            output_device=output_device,
+            detach_outputs=detach_outputs,
+        )
+        outputs = self._empty_outputs(available_outputs, assembly)
         for batch in _progress(data_module.iter_batches(), desc="biochemical-fluorescence"):
             leaf_kwargs = self._leafbio_kwargs(batch, varmap)
             leafbio = LeafBioBatch(**leaf_kwargs)
@@ -538,14 +588,14 @@ class ScopeGridRunner:
                 ),
             )
             for name in CanopyFluorescenceResult.__dataclass_fields__:
-                outputs[name].append(getattr(result.fluorescence, name))
-            outputs["Pnu_Cab"].append(result.Pnu_Cab)
-            outputs["Pnh_Cab"].append(result.Pnh_Cab)
+                self._append_output(outputs, name, getattr(result.fluorescence, name), assembly)
+            self._append_output(outputs, "Pnu_Cab", result.Pnu_Cab, assembly)
+            self._append_output(outputs, "Pnh_Cab", result.Pnh_Cab, assembly)
             for name in physiology_fields:
-                outputs[f"sunlit_{name}"].append(getattr(result.sunlit, name))
-                outputs[f"shaded_{name}"].append(getattr(result.shaded, name))
+                self._append_output(outputs, f"sunlit_{name}", getattr(result.sunlit, name), assembly)
+                self._append_output(outputs, f"shaded_{name}", getattr(result.shaded, name), assembly)
 
-        return {name: torch.cat(chunks, dim=0) for name, chunks in outputs.items()}
+        return self._concat_outputs(outputs)
 
     def run_biochemical_fluorescence_dataset(
         self,
@@ -555,6 +605,7 @@ class ScopeGridRunner:
         biochem_options: BiochemicalOptions | None = None,
         hotspot_var: str | None = None,
         nlayers: int | None = None,
+        output_vars: Sequence[str] | None = None,
     ) -> xr.Dataset:
         outputs = self.run_biochemical_fluorescence(
             data_module,
@@ -562,6 +613,9 @@ class ScopeGridRunner:
             biochem_options=biochem_options,
             hotspot_var=hotspot_var,
             nlayers=nlayers,
+            output_vars=output_vars,
+            output_device="cpu",
+            detach_outputs=True,
         )
         return self._outputs_to_dataset(data_module, outputs, product="biochemical_fluorescence")
 
@@ -571,6 +625,14 @@ class ScopeGridRunner:
             name for name in CanopyEnergyBalanceResult.__dataclass_fields__ if name not in {"sunlit", "shaded", "Tsold"}
         ]
         return physiology_fields, energy_fields
+
+    def _energy_available_outputs(self) -> tuple[str, ...]:
+        physiology_fields, energy_fields = self._energy_result_fields()
+        return (
+            *energy_fields,
+            *(f"sunlit_{name}" for name in physiology_fields),
+            *(f"shaded_{name}" for name in physiology_fields),
+        )
 
     def _build_energy_batch_inputs(
         self,
@@ -702,12 +764,13 @@ class ScopeGridRunner:
         *,
         energy_fields: Sequence[str],
         physiology_fields: Sequence[str],
+        assembly: _OutputAssemblyOptions,
     ) -> None:
         for name in energy_fields:
-            outputs[name].append(getattr(result, name))
+            self._append_output(outputs, name, getattr(result, name), assembly)
         for name in physiology_fields:
-            outputs[f"sunlit_{name}"].append(getattr(result.sunlit, name))
-            outputs[f"shaded_{name}"].append(getattr(result.shaded, name))
+            self._append_output(outputs, f"sunlit_{name}", getattr(result.sunlit, name), assembly)
+            self._append_output(outputs, f"shaded_{name}", getattr(result.shaded, name), assembly)
 
     def _energy_excitation_spectra(self, inputs: _EnergyBatchInputs) -> tuple[torch.Tensor, torch.Tensor]:
         wlP = self.fluspect.spectral.wlP
@@ -732,13 +795,22 @@ class ScopeGridRunner:
         hotspot_var: str | None = None,
         nlayers: int | None = None,
         soil_heat_method: int = 2,
+        output_vars: Sequence[str] | None = None,
+        output_device: torch.device | str | None = None,
+        detach_outputs: bool = False,
     ) -> dict[str, torch.Tensor]:
         physiology_fields, energy_fields = self._energy_result_fields()
-        outputs: dict[str, list[torch.Tensor]] = {
-            **{name: [] for name in energy_fields},
-            **{f"sunlit_{name}": [] for name in physiology_fields},
-            **{f"shaded_{name}": [] for name in physiology_fields},
-        }
+        available_outputs = (
+            *energy_fields,
+            *(f"sunlit_{name}" for name in physiology_fields),
+            *(f"shaded_{name}" for name in physiology_fields),
+        )
+        assembly = self._output_assembly_options(
+            output_vars=output_vars,
+            output_device=output_device,
+            detach_outputs=detach_outputs,
+        )
+        outputs = self._empty_outputs(available_outputs, assembly)
         for batch in data_module.iter_batches():
             inputs = self._build_energy_batch_inputs(
                 batch,
@@ -757,6 +829,7 @@ class ScopeGridRunner:
                 result,
                 energy_fields=energy_fields,
                 physiology_fields=physiology_fields,
+                assembly=assembly,
             )
         return self._concat_outputs(outputs)
 
@@ -770,6 +843,7 @@ class ScopeGridRunner:
         hotspot_var: str | None = None,
         nlayers: int | None = None,
         soil_heat_method: int = 2,
+        output_vars: Sequence[str] | None = None,
     ) -> xr.Dataset:
         outputs = self.run_energy_balance(
             data_module,
@@ -779,6 +853,9 @@ class ScopeGridRunner:
             hotspot_var=hotspot_var,
             nlayers=nlayers,
             soil_heat_method=soil_heat_method,
+            output_vars=output_vars,
+            output_device="cpu",
+            detach_outputs=True,
         )
         return self._outputs_to_dataset(data_module, outputs, product="energy_balance")
 
@@ -792,14 +869,23 @@ class ScopeGridRunner:
         hotspot_var: str | None = None,
         nlayers: int | None = None,
         soil_heat_method: int = 2,
+        output_vars: Sequence[str] | None = None,
+        output_device: torch.device | str | None = None,
+        detach_outputs: bool = False,
     ) -> dict[str, torch.Tensor]:
         physiology_fields, energy_fields = self._energy_result_fields()
-        outputs: dict[str, list[torch.Tensor]] = {
-            **{name: [] for name in CanopyFluorescenceResult.__dataclass_fields__},
-            **{name: [] for name in energy_fields},
-            **{f"sunlit_{name}": [] for name in physiology_fields},
-            **{f"shaded_{name}": [] for name in physiology_fields},
-        }
+        available_outputs = (
+            *CanopyFluorescenceResult.__dataclass_fields__,
+            *energy_fields,
+            *(f"sunlit_{name}" for name in physiology_fields),
+            *(f"shaded_{name}" for name in physiology_fields),
+        )
+        assembly = self._output_assembly_options(
+            output_vars=output_vars,
+            output_device=output_device,
+            detach_outputs=detach_outputs,
+        )
+        outputs = self._empty_outputs(available_outputs, assembly)
         for batch in _progress(data_module.iter_batches(), desc="energy-balance-fluorescence"):
             inputs = self._build_energy_batch_inputs(
                 batch,
@@ -833,12 +919,13 @@ class ScopeGridRunner:
                 Tsh0=inputs.Tsh0,
             )
             for name in CanopyFluorescenceResult.__dataclass_fields__:
-                outputs[name].append(getattr(result.fluorescence, name))
+                self._append_output(outputs, name, getattr(result.fluorescence, name), assembly)
             self._append_energy_outputs(
                 outputs,
                 result.energy,
                 energy_fields=energy_fields,
                 physiology_fields=physiology_fields,
+                assembly=assembly,
             )
 
         return self._concat_outputs(outputs)
@@ -853,6 +940,7 @@ class ScopeGridRunner:
         hotspot_var: str | None = None,
         nlayers: int | None = None,
         soil_heat_method: int = 2,
+        output_vars: Sequence[str] | None = None,
     ) -> xr.Dataset:
         outputs = self.run_energy_balance_fluorescence(
             data_module,
@@ -862,6 +950,9 @@ class ScopeGridRunner:
             hotspot_var=hotspot_var,
             nlayers=nlayers,
             soil_heat_method=soil_heat_method,
+            output_vars=output_vars,
+            output_device="cpu",
+            detach_outputs=True,
         )
         return self._outputs_to_dataset(data_module, outputs, product="energy_balance_fluorescence")
 
@@ -875,14 +966,23 @@ class ScopeGridRunner:
         hotspot_var: str | None = None,
         nlayers: int | None = None,
         soil_heat_method: int = 2,
+        output_vars: Sequence[str] | None = None,
+        output_device: torch.device | str | None = None,
+        detach_outputs: bool = False,
     ) -> dict[str, torch.Tensor]:
         physiology_fields, energy_fields = self._energy_result_fields()
-        outputs: dict[str, list[torch.Tensor]] = {
-            **{name: [] for name in CanopyThermalRadianceResult.__dataclass_fields__},
-            **{name: [] for name in energy_fields},
-            **{f"sunlit_{name}": [] for name in physiology_fields},
-            **{f"shaded_{name}": [] for name in physiology_fields},
-        }
+        available_outputs = (
+            *CanopyThermalRadianceResult.__dataclass_fields__,
+            *energy_fields,
+            *(f"sunlit_{name}" for name in physiology_fields),
+            *(f"shaded_{name}" for name in physiology_fields),
+        )
+        assembly = self._output_assembly_options(
+            output_vars=output_vars,
+            output_device=output_device,
+            detach_outputs=detach_outputs,
+        )
+        outputs = self._empty_outputs(available_outputs, assembly)
         for batch in _progress(data_module.iter_batches(), desc="energy-balance-thermal"):
             inputs = self._build_energy_batch_inputs(
                 batch,
@@ -916,12 +1016,13 @@ class ScopeGridRunner:
                 Tsh0=inputs.Tsh0,
             )
             for name in CanopyThermalRadianceResult.__dataclass_fields__:
-                outputs[name].append(getattr(result.thermal, name))
+                self._append_output(outputs, name, getattr(result.thermal, name), assembly)
             self._append_energy_outputs(
                 outputs,
                 result.energy,
                 energy_fields=energy_fields,
                 physiology_fields=physiology_fields,
+                assembly=assembly,
             )
 
         return self._concat_outputs(outputs)
@@ -936,6 +1037,7 @@ class ScopeGridRunner:
         hotspot_var: str | None = None,
         nlayers: int | None = None,
         soil_heat_method: int = 2,
+        output_vars: Sequence[str] | None = None,
     ) -> xr.Dataset:
         outputs = self.run_energy_balance_thermal(
             data_module,
@@ -945,6 +1047,9 @@ class ScopeGridRunner:
             hotspot_var=hotspot_var,
             nlayers=nlayers,
             soil_heat_method=soil_heat_method,
+            output_vars=output_vars,
+            output_device="cpu",
+            detach_outputs=True,
         )
         return self._outputs_to_dataset(data_module, outputs, product="energy_balance_thermal")
 
@@ -954,8 +1059,16 @@ class ScopeGridRunner:
         *,
         varmap: Mapping[str, str],
         hotspot_var: str | None = None,
+        output_vars: Sequence[str] | None = None,
+        output_device: torch.device | str | None = None,
+        detach_outputs: bool = False,
     ) -> dict[str, torch.Tensor]:
-        outputs: dict[str, list[torch.Tensor]] = {name: [] for name in CanopyFluorescenceResult.__dataclass_fields__}
+        assembly = self._output_assembly_options(
+            output_vars=output_vars,
+            output_device=output_device,
+            detach_outputs=detach_outputs,
+        )
+        outputs = self._empty_outputs(CanopyFluorescenceResult.__dataclass_fields__, assembly)
         for batch in _progress(data_module.iter_batches(), desc="fluorescence"):
             leaf_kwargs = self._leafbio_kwargs(batch, varmap)
             leafbio = LeafBioBatch(**leaf_kwargs)
@@ -981,9 +1094,9 @@ class ScopeGridRunner:
                 hotspot=hotspot,
             )
             for name in outputs:
-                outputs[name].append(getattr(result, name))
+                self._append_output(outputs, name, getattr(result, name), assembly)
 
-        return {name: torch.cat(chunks, dim=0) for name, chunks in outputs.items()}
+        return self._concat_outputs(outputs)
 
     def run_fluorescence_dataset(
         self,
@@ -991,11 +1104,15 @@ class ScopeGridRunner:
         *,
         varmap: Mapping[str, str],
         hotspot_var: str | None = None,
+        output_vars: Sequence[str] | None = None,
     ) -> xr.Dataset:
         outputs = self.run_fluorescence(
             data_module,
             varmap=varmap,
             hotspot_var=hotspot_var,
+            output_vars=output_vars,
+            output_device="cpu",
+            detach_outputs=True,
         )
         return self._outputs_to_dataset(data_module, outputs, product="fluorescence")
 
@@ -1008,8 +1125,16 @@ class ScopeGridRunner:
         directional_psi: torch.Tensor | None = None,
         hotspot_var: str | None = None,
         nlayers: int | None = None,
+        output_vars: Sequence[str] | None = None,
+        output_device: torch.device | str | None = None,
+        detach_outputs: bool = False,
     ) -> dict[str, torch.Tensor]:
-        outputs: dict[str, list[torch.Tensor]] = {name: [] for name in ("LoF_",)}
+        assembly = self._output_assembly_options(
+            output_vars=output_vars,
+            output_device=output_device,
+            detach_outputs=detach_outputs,
+        )
+        outputs = self._empty_outputs(("LoF_",), assembly)
         tto_angles, psi_angles = self._directional_angles(
             data_module,
             varmap=varmap,
@@ -1045,9 +1170,9 @@ class ScopeGridRunner:
                 hotspot=hotspot,
                 nlayers=self._layer_count(nlayers, etau=etau, etah=etah, Tcu=None, Tch=None),
             )
-            outputs["LoF_"].append(result.LoF_)
+            self._append_output(outputs, "LoF_", result.LoF_, assembly)
 
-        return {name: torch.cat(chunks, dim=0) for name, chunks in outputs.items()}
+        return self._concat_outputs(outputs)
 
     def run_directional_fluorescence_dataset(
         self,
@@ -1058,6 +1183,7 @@ class ScopeGridRunner:
         directional_psi: torch.Tensor | None = None,
         hotspot_var: str | None = None,
         nlayers: int | None = None,
+        output_vars: Sequence[str] | None = None,
     ) -> xr.Dataset:
         tto_angles, psi_angles = self._directional_angles(
             data_module,
@@ -1072,6 +1198,9 @@ class ScopeGridRunner:
             directional_psi=psi_angles,
             hotspot_var=hotspot_var,
             nlayers=nlayers,
+            output_vars=output_vars,
+            output_device="cpu",
+            detach_outputs=True,
         )
         return self._directional_outputs_to_dataset(
             data_module,
@@ -1089,10 +1218,16 @@ class ScopeGridRunner:
         varmap: Mapping[str, str],
         hotspot_var: str | None = None,
         nlayers: int | None = None,
+        output_vars: Sequence[str] | None = None,
+        output_device: torch.device | str | None = None,
+        detach_outputs: bool = False,
     ) -> dict[str, torch.Tensor]:
-        outputs: dict[str, list[torch.Tensor]] = {
-            name: [] for name in CanopyFluorescenceProfileResult.__dataclass_fields__
-        }
+        assembly = self._output_assembly_options(
+            output_vars=output_vars,
+            output_device=output_device,
+            detach_outputs=detach_outputs,
+        )
+        outputs = self._empty_outputs(CanopyFluorescenceProfileResult.__dataclass_fields__, assembly)
         expected_layer_count: int | None = None
         for batch in _progress(data_module.iter_batches(), desc="fluorescence-profiles"):
             leaf_kwargs = self._leafbio_kwargs(batch, varmap)
@@ -1127,9 +1262,9 @@ class ScopeGridRunner:
             )
             expected_layer_count = self._accumulate_profile_layer_count(expected_layer_count, result.Ps)
             for name in outputs:
-                outputs[name].append(getattr(result, name))
+                self._append_output(outputs, name, getattr(result, name), assembly)
 
-        return {name: torch.cat(chunks, dim=0) for name, chunks in outputs.items()}
+        return self._concat_outputs(outputs)
 
     def run_fluorescence_profiles_dataset(
         self,
@@ -1138,18 +1273,22 @@ class ScopeGridRunner:
         varmap: Mapping[str, str],
         hotspot_var: str | None = None,
         nlayers: int | None = None,
+        output_vars: Sequence[str] | None = None,
     ) -> xr.Dataset:
         outputs = self.run_fluorescence_profiles(
             data_module,
             varmap=varmap,
             hotspot_var=hotspot_var,
             nlayers=nlayers,
+            output_vars=output_vars,
+            output_device="cpu",
+            detach_outputs=True,
         )
         return self._profile_outputs_to_dataset(
             data_module,
             outputs,
             product="fluorescence_profiles",
-            layer_count=self._profile_layer_count_from_tensor(outputs["Ps"]),
+            layer_count=self._profile_layer_count_from_outputs(data_module, outputs),
             variable_dims={
                 "Ps": ("layer_interface",),
                 "Po": ("layer_interface",),
@@ -1167,8 +1306,16 @@ class ScopeGridRunner:
         varmap: Mapping[str, str],
         hotspot_var: str | None = None,
         nlayers: int | None = None,
+        output_vars: Sequence[str] | None = None,
+        output_device: torch.device | str | None = None,
+        detach_outputs: bool = False,
     ) -> dict[str, torch.Tensor]:
-        outputs: dict[str, list[torch.Tensor]] = {name: [] for name in CanopyFluorescenceResult.__dataclass_fields__}
+        assembly = self._output_assembly_options(
+            output_vars=output_vars,
+            output_device=output_device,
+            detach_outputs=detach_outputs,
+        )
+        outputs = self._empty_outputs(CanopyFluorescenceResult.__dataclass_fields__, assembly)
         for batch in _progress(data_module.iter_batches(), desc="layered-fluorescence"):
             leaf_kwargs = self._leafbio_kwargs(batch, varmap)
             leafbio = LeafBioBatch(**leaf_kwargs)
@@ -1201,9 +1348,9 @@ class ScopeGridRunner:
                 nlayers=self._layer_count(nlayers, etau=etau, etah=etah, Tcu=None, Tch=None),
             )
             for name in outputs:
-                outputs[name].append(getattr(result, name))
+                self._append_output(outputs, name, getattr(result, name), assembly)
 
-        return {name: torch.cat(chunks, dim=0) for name, chunks in outputs.items()}
+        return self._concat_outputs(outputs)
 
     def run_layered_fluorescence_dataset(
         self,
@@ -1212,12 +1359,16 @@ class ScopeGridRunner:
         varmap: Mapping[str, str],
         hotspot_var: str | None = None,
         nlayers: int | None = None,
+        output_vars: Sequence[str] | None = None,
     ) -> xr.Dataset:
         outputs = self.run_layered_fluorescence(
             data_module,
             varmap=varmap,
             hotspot_var=hotspot_var,
             nlayers=nlayers,
+            output_vars=output_vars,
+            output_device="cpu",
+            detach_outputs=True,
         )
         return self._outputs_to_dataset(data_module, outputs, product="layered_fluorescence")
 
@@ -1228,8 +1379,16 @@ class ScopeGridRunner:
         varmap: Mapping[str, str],
         hotspot_var: str | None = None,
         nlayers: int | None = None,
+        output_vars: Sequence[str] | None = None,
+        output_device: torch.device | str | None = None,
+        detach_outputs: bool = False,
     ) -> dict[str, torch.Tensor]:
-        outputs: dict[str, list[torch.Tensor]] = {name: [] for name in CanopyThermalRadianceResult.__dataclass_fields__}
+        assembly = self._output_assembly_options(
+            output_vars=output_vars,
+            output_device=output_device,
+            detach_outputs=detach_outputs,
+        )
+        outputs = self._empty_outputs(CanopyThermalRadianceResult.__dataclass_fields__, assembly)
         for batch in _progress(data_module.iter_batches(), desc="thermal"):
             lai = batch[varmap["LAI"]]
             tts = batch[varmap["tts"]]
@@ -1269,9 +1428,9 @@ class ScopeGridRunner:
                 nlayers=self._layer_count(nlayers, etau=None, etah=None, Tcu=Tcu, Tch=Tch),
             )
             for name in outputs:
-                outputs[name].append(getattr(result, name))
+                self._append_output(outputs, name, getattr(result, name), assembly)
 
-        return {name: torch.cat(chunks, dim=0) for name, chunks in outputs.items()}
+        return self._concat_outputs(outputs)
 
     def run_thermal_dataset(
         self,
@@ -1280,12 +1439,16 @@ class ScopeGridRunner:
         varmap: Mapping[str, str],
         hotspot_var: str | None = None,
         nlayers: int | None = None,
+        output_vars: Sequence[str] | None = None,
     ) -> xr.Dataset:
         outputs = self.run_thermal(
             data_module,
             varmap=varmap,
             hotspot_var=hotspot_var,
             nlayers=nlayers,
+            output_vars=output_vars,
+            output_device="cpu",
+            detach_outputs=True,
         )
         return self._outputs_to_dataset(data_module, outputs, product="thermal")
 
@@ -1298,8 +1461,16 @@ class ScopeGridRunner:
         directional_psi: torch.Tensor | None = None,
         hotspot_var: str | None = None,
         nlayers: int | None = None,
+        output_vars: Sequence[str] | None = None,
+        output_device: torch.device | str | None = None,
+        detach_outputs: bool = False,
     ) -> dict[str, torch.Tensor]:
-        outputs: dict[str, list[torch.Tensor]] = {name: [] for name in ("Lot_", "BrightnessT")}
+        assembly = self._output_assembly_options(
+            output_vars=output_vars,
+            output_device=output_device,
+            detach_outputs=detach_outputs,
+        )
+        outputs = self._empty_outputs(("Lot_", "BrightnessT"), assembly)
         tto_angles, psi_angles = self._directional_angles(
             data_module,
             varmap=varmap,
@@ -1342,10 +1513,10 @@ class ScopeGridRunner:
                 hotspot=hotspot,
                 nlayers=self._layer_count(nlayers, etau=None, etah=None, Tcu=Tcu, Tch=Tch),
             )
-            outputs["Lot_"].append(result.Lot_)
-            outputs["BrightnessT"].append(result.BrightnessT)
+            self._append_output(outputs, "Lot_", result.Lot_, assembly)
+            self._append_output(outputs, "BrightnessT", result.BrightnessT, assembly)
 
-        return {name: torch.cat(chunks, dim=0) for name, chunks in outputs.items()}
+        return self._concat_outputs(outputs)
 
     def run_directional_thermal_dataset(
         self,
@@ -1356,6 +1527,7 @@ class ScopeGridRunner:
         directional_psi: torch.Tensor | None = None,
         hotspot_var: str | None = None,
         nlayers: int | None = None,
+        output_vars: Sequence[str] | None = None,
     ) -> xr.Dataset:
         tto_angles, psi_angles = self._directional_angles(
             data_module,
@@ -1370,6 +1542,9 @@ class ScopeGridRunner:
             directional_psi=psi_angles,
             hotspot_var=hotspot_var,
             nlayers=nlayers,
+            output_vars=output_vars,
+            output_device="cpu",
+            detach_outputs=True,
         )
         return self._directional_outputs_to_dataset(
             data_module,
@@ -1387,8 +1562,16 @@ class ScopeGridRunner:
         varmap: Mapping[str, str],
         hotspot_var: str | None = None,
         nlayers: int | None = None,
+        output_vars: Sequence[str] | None = None,
+        output_device: torch.device | str | None = None,
+        detach_outputs: bool = False,
     ) -> dict[str, torch.Tensor]:
-        outputs: dict[str, list[torch.Tensor]] = {name: [] for name in CanopyThermalProfileResult.__dataclass_fields__}
+        assembly = self._output_assembly_options(
+            output_vars=output_vars,
+            output_device=output_device,
+            detach_outputs=detach_outputs,
+        )
+        outputs = self._empty_outputs(CanopyThermalProfileResult.__dataclass_fields__, assembly)
         expected_layer_count: int | None = None
         for batch in _progress(data_module.iter_batches(), desc="thermal-profiles"):
             lai = batch[varmap["LAI"]]
@@ -1430,9 +1613,9 @@ class ScopeGridRunner:
             )
             expected_layer_count = self._accumulate_profile_layer_count(expected_layer_count, result.Ps)
             for name in outputs:
-                outputs[name].append(getattr(result, name))
+                self._append_output(outputs, name, getattr(result, name), assembly)
 
-        return {name: torch.cat(chunks, dim=0) for name, chunks in outputs.items()}
+        return self._concat_outputs(outputs)
 
     def run_thermal_profiles_dataset(
         self,
@@ -1441,18 +1624,22 @@ class ScopeGridRunner:
         varmap: Mapping[str, str],
         hotspot_var: str | None = None,
         nlayers: int | None = None,
+        output_vars: Sequence[str] | None = None,
     ) -> xr.Dataset:
         outputs = self.run_thermal_profiles(
             data_module,
             varmap=varmap,
             hotspot_var=hotspot_var,
             nlayers=nlayers,
+            output_vars=output_vars,
+            output_device="cpu",
+            detach_outputs=True,
         )
         return self._profile_outputs_to_dataset(
             data_module,
             outputs,
             product="thermal_profiles",
-            layer_count=self._profile_layer_count_from_tensor(outputs["Ps"]),
+            layer_count=self._profile_layer_count_from_outputs(data_module, outputs),
             variable_dims={
                 "Ps": ("layer_interface",),
                 "Po": ("layer_interface",),
@@ -1478,6 +1665,9 @@ class ScopeGridRunner:
         nlayers: int | None = None,
         chunk_size: int | None = 1024,
         batch_size: int | None = None,
+        output_vars: Sequence[str] | None = None,
+        output_device: torch.device | str | None = None,
+        detach: bool = False,
     ) -> dict[str, torch.Tensor]:
         """Run a SCOPE workflow directly on tensors without xarray assembly.
 
@@ -1487,6 +1677,9 @@ class ScopeGridRunner:
         call backward on each chunk loss when peak autograd memory matters.
 
         Set ``chunk_size=None`` to run the entire tensor batch in one forward pass.
+        Use ``output_vars`` to keep only selected output fields, and
+        ``output_device="cpu"`` to move each selected chunk before the final
+        concatenation.
         """
 
         tensor_inputs = self._normalise_tensor_inputs(inputs)
@@ -1519,6 +1712,9 @@ class ScopeGridRunner:
             directional_psi=directional_psi,
             hotspot_var=hotspot_var,
             nlayers=nlayers,
+            output_vars=output_vars,
+            output_device=output_device,
+            detach_outputs=detach,
         )
 
     def iter_scope_tensors(
@@ -1536,6 +1732,9 @@ class ScopeGridRunner:
         nlayers: int | None = None,
         chunk_size: int | None = 1024,
         batch_size: int | None = None,
+        output_vars: Sequence[str] | None = None,
+        output_device: torch.device | str | None = None,
+        detach: bool = False,
     ) -> Iterable[dict[str, torch.Tensor]]:
         """Yield tensor-preserving SCOPE outputs one input chunk at a time.
 
@@ -1582,6 +1781,9 @@ class ScopeGridRunner:
                 directional_psi=directional_psi,
                 hotspot_var=hotspot_var,
                 nlayers=nlayers,
+                output_vars=output_vars,
+                output_device=output_device,
+                detach_outputs=detach,
             )
 
     def iter_scope_dataset_tensors(
@@ -1597,6 +1799,8 @@ class ScopeGridRunner:
         hotspot_var: str | None = None,
         nlayers: int | None = None,
         detach: bool = False,
+        output_vars: Sequence[str] | None = None,
+        output_device: torch.device | str | None = None,
     ) -> Iterable[dict[str, torch.Tensor]]:
         """Yield ``run_scope_dataset(..., return_tensors=True)`` outputs per configured chunk.
 
@@ -1625,8 +1829,11 @@ class ScopeGridRunner:
                 directional_psi=directional_psi,
                 hotspot_var=hotspot_var,
                 nlayers=nlayers,
+                output_vars=output_vars,
+                output_device=output_device,
+                detach_outputs=detach,
             )
-            yield self._detach_tensor_outputs(outputs) if detach else outputs
+            yield outputs
 
     def run_scope_dataset(
         self,
@@ -1642,6 +1849,8 @@ class ScopeGridRunner:
         nlayers: int | None = None,
         return_tensors: bool = False,
         detach: bool = False,
+        output_vars: Sequence[str] | None = None,
+        output_device: torch.device | str | None = None,
     ) -> xr.Dataset | dict[str, torch.Tensor]:
         if return_tensors:
             outputs = self._run_scope_tensor_workflow(
@@ -1654,8 +1863,11 @@ class ScopeGridRunner:
                 directional_psi=directional_psi,
                 hotspot_var=hotspot_var,
                 nlayers=nlayers,
+                output_vars=output_vars,
+                output_device=output_device,
+                detach_outputs=detach,
             )
-            return self._detach_tensor_outputs(outputs) if detach else outputs
+            return outputs
 
         calc_directional = self._scope_option_flag(data_module, scope_options, "calc_directional")
         calc_vert_profiles = self._scope_option_flag(data_module, scope_options, "calc_vert_profiles")
@@ -1663,18 +1875,30 @@ class ScopeGridRunner:
         calc_planck = self._scope_option_flag(data_module, scope_options, "calc_planck")
         calc_ebal = self._scope_option_flag(data_module, scope_options, "calc_ebal")
         reflectance_varmap = self._workflow_reflectance_varmap(varmap)
+        requested = frozenset(output_vars) if output_vars is not None else None
 
-        datasets = [
-            self.run_dataset(
-                data_module,
-                varmap=varmap,
-                hotspot_var=hotspot_var,
-                nlayers=nlayers,
+        def _selected(available: Iterable[str], *, prefix: str | None = None) -> tuple[str, ...] | None:
+            return self._component_output_vars(requested, available, prefix=prefix)
+
+        def _wanted(available: Iterable[str], *, prefix: str | None = None) -> bool:
+            return requested is None or bool(_selected(available, prefix=prefix))
+
+        datasets: list[xr.Dataset] = []
+        components: list[str] = []
+
+        if _wanted(CanopyReflectanceResult.__dataclass_fields__):
+            datasets.append(
+                self.run_dataset(
+                    data_module,
+                    varmap=varmap,
+                    hotspot_var=hotspot_var,
+                    nlayers=nlayers,
+                    output_vars=_selected(CanopyReflectanceResult.__dataclass_fields__),
+                )
             )
-        ]
-        components = ["reflectance"]
+            components.append("reflectance")
 
-        if calc_directional:
+        if calc_directional and _wanted(("refl_", "rso_"), prefix="reflectance_directional"):
             datasets.append(
                 self._prefixed_dataset(
                     self.run_directional_reflectance_dataset(
@@ -1684,13 +1908,17 @@ class ScopeGridRunner:
                         directional_psi=directional_psi,
                         hotspot_var=hotspot_var,
                         nlayers=nlayers,
+                        output_vars=_selected(("refl_", "rso_"), prefix="reflectance_directional"),
                     ),
                     "reflectance_directional",
                 )
             )
             components.append("reflectance_directional")
 
-        if calc_vert_profiles:
+        if calc_vert_profiles and _wanted(
+            CanopyRadiationProfileResult.__dataclass_fields__,
+            prefix="reflectance_profile",
+        ):
             datasets.append(
                 self._prefixed_dataset(
                     self.run_reflectance_profiles_dataset(
@@ -1698,6 +1926,10 @@ class ScopeGridRunner:
                         varmap=reflectance_varmap,
                         hotspot_var=hotspot_var,
                         nlayers=nlayers,
+                        output_vars=_selected(
+                            CanopyRadiationProfileResult.__dataclass_fields__,
+                            prefix="reflectance_profile",
+                        ),
                     ),
                     "reflectance_profile",
                 )
@@ -1719,22 +1951,25 @@ class ScopeGridRunner:
                 energy_options=self._scope_energy_options(data_module, scope_options, energy_options),
                 biochem_options=biochem_options,
                 soil_heat_method=self._scope_option_int(data_module, scope_options, "soil_heat_method", default=2),
+                output_vars=output_vars,
             )
             datasets.extend(coupled_datasets)
             components.extend(coupled_components)
         else:
             if calc_fluor:
-                datasets.append(
-                    self.run_layered_fluorescence_dataset(
-                        data_module,
-                        varmap=varmap,
-                        hotspot_var=hotspot_var,
-                        nlayers=nlayers,
+                if _wanted(CanopyFluorescenceResult.__dataclass_fields__):
+                    datasets.append(
+                        self.run_layered_fluorescence_dataset(
+                            data_module,
+                            varmap=varmap,
+                            hotspot_var=hotspot_var,
+                            nlayers=nlayers,
+                            output_vars=_selected(CanopyFluorescenceResult.__dataclass_fields__),
+                        )
                     )
-                )
-                components.append("fluorescence")
+                    components.append("fluorescence")
 
-                if calc_directional:
+                if calc_directional and _wanted(("LoF_",), prefix="fluorescence_directional"):
                     datasets.append(
                         self._prefixed_dataset(
                             self.run_directional_fluorescence_dataset(
@@ -1744,13 +1979,17 @@ class ScopeGridRunner:
                                 directional_psi=directional_psi,
                                 hotspot_var=hotspot_var,
                                 nlayers=nlayers,
+                                output_vars=_selected(("LoF_",), prefix="fluorescence_directional"),
                             ),
                             "fluorescence_directional",
                         )
                     )
                     components.append("fluorescence_directional")
 
-                if calc_vert_profiles:
+                if calc_vert_profiles and _wanted(
+                    CanopyFluorescenceProfileResult.__dataclass_fields__,
+                    prefix="fluorescence_profile",
+                ):
                     datasets.append(
                         self._prefixed_dataset(
                             self.run_fluorescence_profiles_dataset(
@@ -1758,6 +1997,10 @@ class ScopeGridRunner:
                                 varmap=varmap,
                                 hotspot_var=hotspot_var,
                                 nlayers=nlayers,
+                                output_vars=_selected(
+                                    CanopyFluorescenceProfileResult.__dataclass_fields__,
+                                    prefix="fluorescence_profile",
+                                ),
                             ),
                             "fluorescence_profile",
                         )
@@ -1765,17 +2008,19 @@ class ScopeGridRunner:
                     components.append("fluorescence_profile")
 
             if calc_planck:
-                datasets.append(
-                    self.run_thermal_dataset(
-                        data_module,
-                        varmap=varmap,
-                        hotspot_var=hotspot_var,
-                        nlayers=nlayers,
+                if _wanted(CanopyThermalRadianceResult.__dataclass_fields__):
+                    datasets.append(
+                        self.run_thermal_dataset(
+                            data_module,
+                            varmap=varmap,
+                            hotspot_var=hotspot_var,
+                            nlayers=nlayers,
+                            output_vars=_selected(CanopyThermalRadianceResult.__dataclass_fields__),
+                        )
                     )
-                )
-                components.append("thermal")
+                    components.append("thermal")
 
-                if calc_directional:
+                if calc_directional and _wanted(("Lot_", "BrightnessT"), prefix="thermal_directional"):
                     datasets.append(
                         self._prefixed_dataset(
                             self.run_directional_thermal_dataset(
@@ -1785,13 +2030,17 @@ class ScopeGridRunner:
                                 directional_psi=directional_psi,
                                 hotspot_var=hotspot_var,
                                 nlayers=nlayers,
+                                output_vars=_selected(("Lot_", "BrightnessT"), prefix="thermal_directional"),
                             ),
                             "thermal_directional",
                         )
                     )
                     components.append("thermal_directional")
 
-                if calc_vert_profiles:
+                if calc_vert_profiles and _wanted(
+                    CanopyThermalProfileResult.__dataclass_fields__,
+                    prefix="thermal_profile",
+                ):
                     datasets.append(
                         self._prefixed_dataset(
                             self.run_thermal_profiles_dataset(
@@ -1799,19 +2048,29 @@ class ScopeGridRunner:
                                 varmap=varmap,
                                 hotspot_var=hotspot_var,
                                 nlayers=nlayers,
+                                output_vars=_selected(
+                                    CanopyThermalProfileResult.__dataclass_fields__,
+                                    prefix="thermal_profile",
+                                ),
                             ),
                             "thermal_profile",
                         )
                     )
                     components.append("thermal_profile")
 
-        return self._merge_workflow_datasets(
+        if not datasets:
+            self._validate_requested_outputs(requested, ())
+            raise ValueError("No output variables were selected for dataset assembly")
+
+        merged = self._merge_workflow_datasets(
             data_module,
             datasets,
             product="scope_workflow",
             components=components,
             scope_options=scope_options,
         )
+        self._validate_requested_outputs(requested, merged.data_vars)
+        return merged
 
     def _run_named_tensor_workflow(
         self,
@@ -1826,6 +2085,9 @@ class ScopeGridRunner:
         directional_psi: torch.Tensor | None,
         hotspot_var: str | None,
         nlayers: int | None,
+        output_vars: Sequence[str] | None,
+        output_device: torch.device | str | None,
+        detach_outputs: bool,
     ) -> dict[str, torch.Tensor]:
         workflow_key = workflow.strip().lower().replace("-", "_")
         soil_heat_method = self._scope_option_int(data_module, scope_options, "soil_heat_method", default=2)
@@ -1841,9 +2103,20 @@ class ScopeGridRunner:
                 directional_psi=directional_psi,
                 hotspot_var=hotspot_var,
                 nlayers=nlayers,
+                output_vars=output_vars,
+                output_device=output_device,
+                detach_outputs=detach_outputs,
             )
         if workflow_key == "reflectance":
-            return self.run(data_module, varmap=varmap, hotspot_var=hotspot_var, nlayers=nlayers)
+            return self.run(
+                data_module,
+                varmap=varmap,
+                hotspot_var=hotspot_var,
+                nlayers=nlayers,
+                output_vars=output_vars,
+                output_device=output_device,
+                detach_outputs=detach_outputs,
+            )
         if workflow_key == "directional_reflectance":
             return self.run_directional_reflectance(
                 data_module,
@@ -1852,13 +2125,39 @@ class ScopeGridRunner:
                 directional_psi=directional_psi,
                 hotspot_var=hotspot_var,
                 nlayers=nlayers,
+                output_vars=output_vars,
+                output_device=output_device,
+                detach_outputs=detach_outputs,
             )
         if workflow_key == "reflectance_profiles":
-            return self.run_reflectance_profiles(data_module, varmap=varmap, hotspot_var=hotspot_var, nlayers=nlayers)
+            return self.run_reflectance_profiles(
+                data_module,
+                varmap=varmap,
+                hotspot_var=hotspot_var,
+                nlayers=nlayers,
+                output_vars=output_vars,
+                output_device=output_device,
+                detach_outputs=detach_outputs,
+            )
         if workflow_key == "fluorescence":
-            return self.run_fluorescence(data_module, varmap=varmap, hotspot_var=hotspot_var)
+            return self.run_fluorescence(
+                data_module,
+                varmap=varmap,
+                hotspot_var=hotspot_var,
+                output_vars=output_vars,
+                output_device=output_device,
+                detach_outputs=detach_outputs,
+            )
         if workflow_key == "layered_fluorescence":
-            return self.run_layered_fluorescence(data_module, varmap=varmap, hotspot_var=hotspot_var, nlayers=nlayers)
+            return self.run_layered_fluorescence(
+                data_module,
+                varmap=varmap,
+                hotspot_var=hotspot_var,
+                nlayers=nlayers,
+                output_vars=output_vars,
+                output_device=output_device,
+                detach_outputs=detach_outputs,
+            )
         if workflow_key == "directional_fluorescence":
             return self.run_directional_fluorescence(
                 data_module,
@@ -1867,11 +2166,30 @@ class ScopeGridRunner:
                 directional_psi=directional_psi,
                 hotspot_var=hotspot_var,
                 nlayers=nlayers,
+                output_vars=output_vars,
+                output_device=output_device,
+                detach_outputs=detach_outputs,
             )
         if workflow_key == "fluorescence_profiles":
-            return self.run_fluorescence_profiles(data_module, varmap=varmap, hotspot_var=hotspot_var, nlayers=nlayers)
+            return self.run_fluorescence_profiles(
+                data_module,
+                varmap=varmap,
+                hotspot_var=hotspot_var,
+                nlayers=nlayers,
+                output_vars=output_vars,
+                output_device=output_device,
+                detach_outputs=detach_outputs,
+            )
         if workflow_key == "thermal":
-            return self.run_thermal(data_module, varmap=varmap, hotspot_var=hotspot_var, nlayers=nlayers)
+            return self.run_thermal(
+                data_module,
+                varmap=varmap,
+                hotspot_var=hotspot_var,
+                nlayers=nlayers,
+                output_vars=output_vars,
+                output_device=output_device,
+                detach_outputs=detach_outputs,
+            )
         if workflow_key == "directional_thermal":
             return self.run_directional_thermal(
                 data_module,
@@ -1880,9 +2198,20 @@ class ScopeGridRunner:
                 directional_psi=directional_psi,
                 hotspot_var=hotspot_var,
                 nlayers=nlayers,
+                output_vars=output_vars,
+                output_device=output_device,
+                detach_outputs=detach_outputs,
             )
         if workflow_key == "thermal_profiles":
-            return self.run_thermal_profiles(data_module, varmap=varmap, hotspot_var=hotspot_var, nlayers=nlayers)
+            return self.run_thermal_profiles(
+                data_module,
+                varmap=varmap,
+                hotspot_var=hotspot_var,
+                nlayers=nlayers,
+                output_vars=output_vars,
+                output_device=output_device,
+                detach_outputs=detach_outputs,
+            )
         if workflow_key == "biochemical_fluorescence":
             return self.run_biochemical_fluorescence(
                 data_module,
@@ -1890,6 +2219,9 @@ class ScopeGridRunner:
                 biochem_options=biochem_options,
                 hotspot_var=hotspot_var,
                 nlayers=nlayers,
+                output_vars=output_vars,
+                output_device=output_device,
+                detach_outputs=detach_outputs,
             )
         if workflow_key == "energy_balance":
             return self.run_energy_balance(
@@ -1900,6 +2232,9 @@ class ScopeGridRunner:
                 hotspot_var=hotspot_var,
                 nlayers=nlayers,
                 soil_heat_method=soil_heat_method,
+                output_vars=output_vars,
+                output_device=output_device,
+                detach_outputs=detach_outputs,
             )
         if workflow_key == "energy_balance_fluorescence":
             return self.run_energy_balance_fluorescence(
@@ -1910,6 +2245,9 @@ class ScopeGridRunner:
                 hotspot_var=hotspot_var,
                 nlayers=nlayers,
                 soil_heat_method=soil_heat_method,
+                output_vars=output_vars,
+                output_device=output_device,
+                detach_outputs=detach_outputs,
             )
         if workflow_key == "energy_balance_thermal":
             return self.run_energy_balance_thermal(
@@ -1920,6 +2258,9 @@ class ScopeGridRunner:
                 hotspot_var=hotspot_var,
                 nlayers=nlayers,
                 soil_heat_method=soil_heat_method,
+                output_vars=output_vars,
+                output_device=output_device,
+                detach_outputs=detach_outputs,
             )
         raise ValueError(f"Unsupported SCOPE tensor workflow '{workflow}'")
 
@@ -1935,6 +2276,9 @@ class ScopeGridRunner:
         directional_psi: torch.Tensor | None,
         hotspot_var: str | None,
         nlayers: int | None,
+        output_vars: Sequence[str] | None = None,
+        output_device: torch.device | str | None = None,
+        detach_outputs: bool = False,
     ) -> dict[str, torch.Tensor]:
         calc_directional = self._scope_option_flag(data_module, scope_options, "calc_directional")
         calc_vert_profiles = self._scope_option_flag(data_module, scope_options, "calc_vert_profiles")
@@ -1943,15 +2287,36 @@ class ScopeGridRunner:
         calc_ebal = self._scope_option_flag(data_module, scope_options, "calc_ebal")
         reflectance_varmap = self._workflow_reflectance_varmap(varmap)
         resolved_energy_options = self._scope_energy_options(data_module, scope_options, energy_options)
+        requested = frozenset(output_vars) if output_vars is not None else None
+
+        def _selected(available: Iterable[str], *, prefix: str | None = None) -> tuple[str, ...] | None:
+            return self._component_output_vars(requested, available, prefix=prefix)
+
+        def _wanted(available: Iterable[str], *, prefix: str | None = None) -> bool:
+            return requested is None or bool(_selected(available, prefix=prefix))
+
+        def _selected_or_all(available: Iterable[str], *, prefix: str | None = None) -> tuple[str, ...]:
+            names = tuple(available)
+            selected = _selected(names, prefix=prefix)
+            return names if selected is None else selected
 
         outputs: dict[str, torch.Tensor] = {}
-        self._merge_tensor_component(
-            outputs,
-            "reflectance",
-            self.run(data_module, varmap=varmap, hotspot_var=hotspot_var, nlayers=nlayers),
-        )
+        if _wanted(CanopyReflectanceResult.__dataclass_fields__):
+            self._merge_tensor_component(
+                outputs,
+                "reflectance",
+                self.run(
+                    data_module,
+                    varmap=varmap,
+                    hotspot_var=hotspot_var,
+                    nlayers=nlayers,
+                    output_vars=_selected(CanopyReflectanceResult.__dataclass_fields__),
+                    output_device=output_device,
+                    detach_outputs=detach_outputs,
+                ),
+            )
 
-        if calc_directional:
+        if calc_directional and _wanted(("refl_", "rso_"), prefix="reflectance_directional"):
             self._merge_tensor_component(
                 outputs,
                 "reflectance_directional",
@@ -1962,11 +2327,17 @@ class ScopeGridRunner:
                     directional_psi=directional_psi,
                     hotspot_var=hotspot_var,
                     nlayers=nlayers,
+                    output_vars=_selected(("refl_", "rso_"), prefix="reflectance_directional"),
+                    output_device=output_device,
+                    detach_outputs=detach_outputs,
                 ),
                 prefix="reflectance_directional",
             )
 
-        if calc_vert_profiles:
+        if calc_vert_profiles and _wanted(
+            CanopyRadiationProfileResult.__dataclass_fields__,
+            prefix="reflectance_profile",
+        ):
             self._merge_tensor_component(
                 outputs,
                 "reflectance_profile",
@@ -1975,26 +2346,37 @@ class ScopeGridRunner:
                     varmap=reflectance_varmap,
                     hotspot_var=hotspot_var,
                     nlayers=nlayers,
+                    output_vars=_selected(
+                        CanopyRadiationProfileResult.__dataclass_fields__,
+                        prefix="reflectance_profile",
+                    ),
+                    output_device=output_device,
+                    detach_outputs=detach_outputs,
                 ),
                 prefix="reflectance_profile",
             )
 
         if calc_ebal:
             soil_heat_method = self._scope_option_int(data_module, scope_options, "soil_heat_method", default=2)
-            self._merge_tensor_component(
-                outputs,
-                "energy_balance",
-                self.run_energy_balance(
-                    data_module,
-                    varmap=varmap,
-                    biochem_options=biochem_options,
-                    energy_options=resolved_energy_options,
-                    hotspot_var=hotspot_var,
-                    nlayers=nlayers,
-                    soil_heat_method=soil_heat_method,
-                ),
-            )
-            if calc_fluor:
+            energy_available = self._energy_available_outputs()
+            if _wanted(energy_available):
+                self._merge_tensor_component(
+                    outputs,
+                    "energy_balance",
+                    self.run_energy_balance(
+                        data_module,
+                        varmap=varmap,
+                        biochem_options=biochem_options,
+                        energy_options=resolved_energy_options,
+                        hotspot_var=hotspot_var,
+                        nlayers=nlayers,
+                        soil_heat_method=soil_heat_method,
+                        output_vars=_selected_or_all(energy_available),
+                        output_device=output_device,
+                        detach_outputs=detach_outputs,
+                    ),
+                )
+            if calc_fluor and _wanted(CanopyFluorescenceResult.__dataclass_fields__):
                 fluorescence = self.run_energy_balance_fluorescence(
                     data_module,
                     varmap=varmap,
@@ -2003,13 +2385,16 @@ class ScopeGridRunner:
                     hotspot_var=hotspot_var,
                     nlayers=nlayers,
                     soil_heat_method=soil_heat_method,
+                    output_vars=_selected_or_all(CanopyFluorescenceResult.__dataclass_fields__),
+                    output_device=output_device,
+                    detach_outputs=detach_outputs,
                 )
                 self._merge_tensor_component(
                     outputs,
                     "energy_balance_fluorescence",
-                    {name: fluorescence[name] for name in CanopyFluorescenceResult.__dataclass_fields__},
+                    fluorescence,
                 )
-            if calc_planck:
+            if calc_planck and _wanted(CanopyThermalRadianceResult.__dataclass_fields__):
                 thermal = self.run_energy_balance_thermal(
                     data_module,
                     varmap=varmap,
@@ -2018,26 +2403,34 @@ class ScopeGridRunner:
                     hotspot_var=hotspot_var,
                     nlayers=nlayers,
                     soil_heat_method=soil_heat_method,
+                    output_vars=_selected_or_all(CanopyThermalRadianceResult.__dataclass_fields__),
+                    output_device=output_device,
+                    detach_outputs=detach_outputs,
                 )
                 self._merge_tensor_component(
                     outputs,
                     "energy_balance_thermal",
-                    {name: thermal[name] for name in CanopyThermalRadianceResult.__dataclass_fields__},
+                    thermal,
                 )
+            self._validate_requested_outputs(requested, outputs)
             return outputs
 
         if calc_fluor:
-            self._merge_tensor_component(
-                outputs,
-                "fluorescence",
-                self.run_layered_fluorescence(
-                    data_module,
-                    varmap=varmap,
-                    hotspot_var=hotspot_var,
-                    nlayers=nlayers,
-                ),
-            )
-            if calc_directional:
+            if _wanted(CanopyFluorescenceResult.__dataclass_fields__):
+                self._merge_tensor_component(
+                    outputs,
+                    "fluorescence",
+                    self.run_layered_fluorescence(
+                        data_module,
+                        varmap=varmap,
+                        hotspot_var=hotspot_var,
+                        nlayers=nlayers,
+                        output_vars=_selected(CanopyFluorescenceResult.__dataclass_fields__),
+                        output_device=output_device,
+                        detach_outputs=detach_outputs,
+                    ),
+                )
+            if calc_directional and _wanted(("LoF_",), prefix="fluorescence_directional"):
                 self._merge_tensor_component(
                     outputs,
                     "fluorescence_directional",
@@ -2048,10 +2441,16 @@ class ScopeGridRunner:
                         directional_psi=directional_psi,
                         hotspot_var=hotspot_var,
                         nlayers=nlayers,
+                        output_vars=_selected(("LoF_",), prefix="fluorescence_directional"),
+                        output_device=output_device,
+                        detach_outputs=detach_outputs,
                     ),
                     prefix="fluorescence_directional",
                 )
-            if calc_vert_profiles:
+            if calc_vert_profiles and _wanted(
+                CanopyFluorescenceProfileResult.__dataclass_fields__,
+                prefix="fluorescence_profile",
+            ):
                 self._merge_tensor_component(
                     outputs,
                     "fluorescence_profile",
@@ -2060,17 +2459,32 @@ class ScopeGridRunner:
                         varmap=varmap,
                         hotspot_var=hotspot_var,
                         nlayers=nlayers,
+                        output_vars=_selected(
+                            CanopyFluorescenceProfileResult.__dataclass_fields__,
+                            prefix="fluorescence_profile",
+                        ),
+                        output_device=output_device,
+                        detach_outputs=detach_outputs,
                     ),
                     prefix="fluorescence_profile",
                 )
 
         if calc_planck:
-            self._merge_tensor_component(
-                outputs,
-                "thermal",
-                self.run_thermal(data_module, varmap=varmap, hotspot_var=hotspot_var, nlayers=nlayers),
-            )
-            if calc_directional:
+            if _wanted(CanopyThermalRadianceResult.__dataclass_fields__):
+                self._merge_tensor_component(
+                    outputs,
+                    "thermal",
+                    self.run_thermal(
+                        data_module,
+                        varmap=varmap,
+                        hotspot_var=hotspot_var,
+                        nlayers=nlayers,
+                        output_vars=_selected(CanopyThermalRadianceResult.__dataclass_fields__),
+                        output_device=output_device,
+                        detach_outputs=detach_outputs,
+                    ),
+                )
+            if calc_directional and _wanted(("Lot_", "BrightnessT"), prefix="thermal_directional"):
                 self._merge_tensor_component(
                     outputs,
                     "thermal_directional",
@@ -2081,17 +2495,35 @@ class ScopeGridRunner:
                         directional_psi=directional_psi,
                         hotspot_var=hotspot_var,
                         nlayers=nlayers,
+                        output_vars=_selected(("Lot_", "BrightnessT"), prefix="thermal_directional"),
+                        output_device=output_device,
+                        detach_outputs=detach_outputs,
                     ),
                     prefix="thermal_directional",
                 )
-            if calc_vert_profiles:
+            if calc_vert_profiles and _wanted(
+                CanopyThermalProfileResult.__dataclass_fields__,
+                prefix="thermal_profile",
+            ):
                 self._merge_tensor_component(
                     outputs,
                     "thermal_profile",
-                    self.run_thermal_profiles(data_module, varmap=varmap, hotspot_var=hotspot_var, nlayers=nlayers),
+                    self.run_thermal_profiles(
+                        data_module,
+                        varmap=varmap,
+                        hotspot_var=hotspot_var,
+                        nlayers=nlayers,
+                        output_vars=_selected(
+                            CanopyThermalProfileResult.__dataclass_fields__,
+                            prefix="thermal_profile",
+                        ),
+                        output_device=output_device,
+                        detach_outputs=detach_outputs,
+                    ),
                     prefix="thermal_profile",
                 )
 
+        self._validate_requested_outputs(requested, outputs)
         return outputs
 
     def _outputs_to_dataset(
@@ -2194,6 +2626,97 @@ class ScopeGridRunner:
     def _detach_tensor_outputs(self, outputs: Mapping[str, torch.Tensor]) -> dict[str, torch.Tensor]:
         return {name: value.detach() for name, value in outputs.items()}
 
+    def _output_assembly_options(
+        self,
+        *,
+        output_vars: Sequence[str] | None = None,
+        output_device: torch.device | str | None = None,
+        detach_outputs: bool = False,
+    ) -> _OutputAssemblyOptions:
+        return _OutputAssemblyOptions(
+            output_vars=frozenset(output_vars) if output_vars is not None else None,
+            output_device=torch.device(output_device) if output_device is not None else None,
+            detach=detach_outputs,
+        )
+
+    def _empty_outputs(
+        self,
+        available: Iterable[str],
+        assembly: _OutputAssemblyOptions,
+    ) -> dict[str, list[torch.Tensor]]:
+        return {name: [] for name in self._selected_output_names(available, assembly.output_vars)}
+
+    def _selected_output_names(
+        self,
+        available: Iterable[str],
+        output_vars: frozenset[str] | None,
+    ) -> tuple[str, ...]:
+        names = tuple(available)
+        if output_vars is None:
+            return names
+        missing = output_vars.difference(names)
+        if missing:
+            raise KeyError(
+                "Requested output variables are not available: "
+                f"{sorted(missing)}. Available outputs: {list(names)}"
+            )
+        return tuple(name for name in names if name in output_vars)
+
+    def _component_output_vars(
+        self,
+        requested: frozenset[str] | None,
+        available: Iterable[str],
+        *,
+        prefix: str | None = None,
+    ) -> tuple[str, ...] | None:
+        names = tuple(available)
+        if requested is None:
+            return None
+        selected: list[str] = []
+        for name in names:
+            output_name = f"{prefix}_{name}" if prefix is not None else name
+            if output_name in requested:
+                selected.append(name)
+        return tuple(selected)
+
+    def _validate_requested_outputs(
+        self,
+        requested: Sequence[str] | frozenset[str] | None,
+        available: Iterable[str],
+    ) -> None:
+        if requested is None:
+            return
+        available_set = frozenset(available)
+        missing = frozenset(requested).difference(available_set)
+        if missing:
+            raise KeyError(
+                "Requested output variables were not produced: "
+                f"{sorted(missing)}. Produced outputs: {sorted(available_set)}"
+            )
+
+    def _prepare_output_chunk(
+        self,
+        value: torch.Tensor,
+        assembly: _OutputAssemblyOptions,
+    ) -> torch.Tensor:
+        tensor = torch.as_tensor(value)
+        if assembly.detach:
+            tensor = tensor.detach()
+        if assembly.output_device is not None:
+            tensor = tensor.to(device=assembly.output_device)
+        return tensor
+
+    def _append_output(
+        self,
+        outputs: dict[str, list[torch.Tensor]],
+        name: str,
+        value: torch.Tensor,
+        assembly: _OutputAssemblyOptions,
+    ) -> None:
+        if name not in outputs:
+            return
+        outputs[name].append(self._prepare_output_chunk(value, assembly))
+
     def _run_coupled_scope_datasets(
         self,
         data_module: ScopeGridDataModule,
@@ -2210,27 +2733,83 @@ class ScopeGridRunner:
         energy_options: EnergyBalanceOptions | None,
         biochem_options: BiochemicalOptions | None,
         soil_heat_method: int,
+        output_vars: Sequence[str] | None = None,
     ) -> tuple[list[xr.Dataset], list[str]]:
         physiology_fields, energy_fields = self._energy_result_fields()
+        requested = frozenset(output_vars) if output_vars is not None else None
+        assembly = self._output_assembly_options(output_device="cpu", detach_outputs=True)
+        energy_available = (
+            *energy_fields,
+            *(f"sunlit_{name}" for name in physiology_fields),
+            *(f"shaded_{name}" for name in physiology_fields),
+        )
         coupled_layer_count: int | None = None
-        energy_outputs: dict[str, list[torch.Tensor]] = {
-            **{name: [] for name in energy_fields},
-            **{f"sunlit_{name}": [] for name in physiology_fields},
-            **{f"shaded_{name}": [] for name in physiology_fields},
-        }
 
-        def _init(names: Sequence[str]) -> dict[str, list[torch.Tensor]]:
+        def _init(names: Iterable[str]) -> dict[str, list[torch.Tensor]]:
             return {name: [] for name in names}
 
-        fluorescence_outputs = _init(CanopyFluorescenceResult.__dataclass_fields__) if calc_fluor else None
-        thermal_outputs = _init(CanopyThermalRadianceResult.__dataclass_fields__) if calc_planck else None
-        fluorescence_directional_outputs = _init(("LoF_",)) if calc_fluor and calc_directional else None
-        thermal_directional_outputs = _init(("Lot_", "BrightnessT")) if calc_planck and calc_directional else None
+        def _selected(available: Iterable[str], *, prefix: str | None = None) -> tuple[str, ...] | None:
+            return self._component_output_vars(requested, available, prefix=prefix)
+
+        def _wanted(available: Iterable[str], *, prefix: str | None = None) -> bool:
+            return requested is None or bool(_selected(available, prefix=prefix))
+
+        def _selected_or_all(available: Iterable[str], *, prefix: str | None = None) -> tuple[str, ...]:
+            names = tuple(available)
+            selected = _selected(names, prefix=prefix)
+            return names if selected is None else selected
+
+        energy_outputs = _init(_selected_or_all(energy_available)) if _wanted(energy_available) else None
+        fluorescence_outputs = (
+            _init(_selected_or_all(CanopyFluorescenceResult.__dataclass_fields__))
+            if calc_fluor and _wanted(CanopyFluorescenceResult.__dataclass_fields__)
+            else None
+        )
+        thermal_outputs = (
+            _init(_selected_or_all(CanopyThermalRadianceResult.__dataclass_fields__))
+            if calc_planck and _wanted(CanopyThermalRadianceResult.__dataclass_fields__)
+            else None
+        )
+        fluorescence_directional_outputs = (
+            _init(_selected_or_all(("LoF_",), prefix="energy_balance_fluorescence_directional"))
+            if calc_fluor
+            and calc_directional
+            and _wanted(("LoF_",), prefix="energy_balance_fluorescence_directional")
+            else None
+        )
+        thermal_directional_outputs = (
+            _init(_selected_or_all(("Lot_", "BrightnessT"), prefix="energy_balance_thermal_directional"))
+            if calc_planck
+            and calc_directional
+            and _wanted(("Lot_", "BrightnessT"), prefix="energy_balance_thermal_directional")
+            else None
+        )
         fluorescence_profile_outputs = (
-            _init(CanopyFluorescenceProfileResult.__dataclass_fields__) if calc_fluor and calc_vert_profiles else None
+            _init(
+                _selected_or_all(
+                    CanopyFluorescenceProfileResult.__dataclass_fields__,
+                    prefix="energy_balance_fluorescence_profile",
+                )
+            )
+            if calc_fluor
+            and calc_vert_profiles
+            and _wanted(
+                CanopyFluorescenceProfileResult.__dataclass_fields__,
+                prefix="energy_balance_fluorescence_profile",
+            )
+            else None
         )
         thermal_profile_outputs = (
-            _init(CanopyThermalProfileResult.__dataclass_fields__) if calc_planck and calc_vert_profiles else None
+            _init(
+                _selected_or_all(
+                    CanopyThermalProfileResult.__dataclass_fields__,
+                    prefix="energy_balance_thermal_profile",
+                )
+            )
+            if calc_planck
+            and calc_vert_profiles
+            and _wanted(CanopyThermalProfileResult.__dataclass_fields__, prefix="energy_balance_thermal_profile")
+            else None
         )
         need_directional_angles = (
             fluorescence_directional_outputs is not None or thermal_directional_outputs is not None
@@ -2269,12 +2848,14 @@ class ScopeGridRunner:
                 if coupled_layer_count is not None and coupled_layer_count != current_layer_count:
                     raise ValueError("Coupled scope workflows require a uniform layer count across all batches")
                 coupled_layer_count = current_layer_count
-            self._append_energy_outputs(
-                energy_outputs,
-                energy,
-                energy_fields=energy_fields,
-                physiology_fields=physiology_fields,
-            )
+            if energy_outputs is not None:
+                self._append_energy_outputs(
+                    energy_outputs,
+                    energy,
+                    energy_fields=energy_fields,
+                    physiology_fields=physiology_fields,
+                    assembly=assembly,
+                )
 
             excitation_spectra: tuple[torch.Tensor, torch.Tensor] | None = None
             if fluorescence_directional_outputs is not None or fluorescence_profile_outputs is not None:
@@ -2295,46 +2876,46 @@ class ScopeGridRunner:
                     lidf=None,
                 )
                 for name in fluorescence_outputs:
-                    fluorescence_outputs[name].append(getattr(fluorescence, name))
+                    self._append_output(fluorescence_outputs, name, getattr(fluorescence, name), assembly)
 
-                if fluorescence_directional_outputs is not None:
-                    assert tto_angles is not None and psi_angles is not None and excitation_spectra is not None
-                    Esun_e, Esky_e = excitation_spectra
-                    directional = self.fluorescence_model.directional(
-                        inputs.leafbio,
-                        inputs.soil_refl,
-                        inputs.lai,
-                        inputs.tts,
-                        tto_angles,
-                        psi_angles,
-                        Esun_e,
-                        Esky_e,
-                        etau=energy.sunlit.eta,
-                        etah=energy.shaded.eta,
-                        hotspot=inputs.hotspot,
-                        nlayers=inputs.nlayers,
-                    )
-                    fluorescence_directional_outputs["LoF_"].append(directional.LoF_)
+            if fluorescence_directional_outputs is not None:
+                assert tto_angles is not None and psi_angles is not None and excitation_spectra is not None
+                Esun_e, Esky_e = excitation_spectra
+                directional = self.fluorescence_model.directional(
+                    inputs.leafbio,
+                    inputs.soil_refl,
+                    inputs.lai,
+                    inputs.tts,
+                    tto_angles,
+                    psi_angles,
+                    Esun_e,
+                    Esky_e,
+                    etau=energy.sunlit.eta,
+                    etah=energy.shaded.eta,
+                    hotspot=inputs.hotspot,
+                    nlayers=inputs.nlayers,
+                )
+                self._append_output(fluorescence_directional_outputs, "LoF_", directional.LoF_, assembly)
 
-                if fluorescence_profile_outputs is not None:
-                    assert excitation_spectra is not None
-                    Esun_e, Esky_e = excitation_spectra
-                    profiles = self.fluorescence_model.profiles(
-                        inputs.leafbio,
-                        inputs.soil_refl,
-                        inputs.lai,
-                        inputs.tts,
-                        inputs.tto,
-                        inputs.psi,
-                        Esun_e,
-                        Esky_e,
-                        etau=energy.sunlit.eta,
-                        etah=energy.shaded.eta,
-                        hotspot=inputs.hotspot,
-                        nlayers=inputs.nlayers,
-                    )
-                    for name in fluorescence_profile_outputs:
-                        fluorescence_profile_outputs[name].append(getattr(profiles, name))
+            if fluorescence_profile_outputs is not None:
+                assert excitation_spectra is not None
+                Esun_e, Esky_e = excitation_spectra
+                profiles = self.fluorescence_model.profiles(
+                    inputs.leafbio,
+                    inputs.soil_refl,
+                    inputs.lai,
+                    inputs.tts,
+                    inputs.tto,
+                    inputs.psi,
+                    Esun_e,
+                    Esky_e,
+                    etau=energy.sunlit.eta,
+                    etah=energy.shaded.eta,
+                    hotspot=inputs.hotspot,
+                    nlayers=inputs.nlayers,
+                )
+                for name in fluorescence_profile_outputs:
+                    self._append_output(fluorescence_profile_outputs, name, getattr(profiles, name), assembly)
 
             if thermal_outputs is not None:
                 thermal = self.energy_balance_model._thermal_from_energy(
@@ -2349,42 +2930,47 @@ class ScopeGridRunner:
                     wlT=None,
                 )
                 for name in thermal_outputs:
-                    thermal_outputs[name].append(getattr(thermal, name))
+                    self._append_output(thermal_outputs, name, getattr(thermal, name), assembly)
 
-                if thermal_directional_outputs is not None:
-                    assert tto_angles is not None and psi_angles is not None
-                    directional = self.thermal_model.directional(
-                        inputs.lai,
-                        inputs.tts,
-                        tto_angles,
-                        psi_angles,
-                        energy.Tcu,
-                        energy.Tch,
-                        energy.Tsu,
-                        energy.Tsh,
-                        thermal_optics=inputs.soil.thermal_optics,
-                        hotspot=inputs.hotspot,
-                        nlayers=inputs.nlayers,
-                    )
-                    thermal_directional_outputs["Lot_"].append(directional.Lot_)
-                    thermal_directional_outputs["BrightnessT"].append(directional.BrightnessT)
+            if thermal_directional_outputs is not None:
+                assert tto_angles is not None and psi_angles is not None
+                directional = self.thermal_model.directional(
+                    inputs.lai,
+                    inputs.tts,
+                    tto_angles,
+                    psi_angles,
+                    energy.Tcu,
+                    energy.Tch,
+                    energy.Tsu,
+                    energy.Tsh,
+                    thermal_optics=inputs.soil.thermal_optics,
+                    hotspot=inputs.hotspot,
+                    nlayers=inputs.nlayers,
+                )
+                self._append_output(thermal_directional_outputs, "Lot_", directional.Lot_, assembly)
+                self._append_output(
+                    thermal_directional_outputs,
+                    "BrightnessT",
+                    directional.BrightnessT,
+                    assembly,
+                )
 
-                if thermal_profile_outputs is not None:
-                    profiles = self.thermal_model.profiles(
-                        inputs.lai,
-                        inputs.tts,
-                        inputs.tto,
-                        inputs.psi,
-                        energy.Tcu,
-                        energy.Tch,
-                        energy.Tsu,
-                        energy.Tsh,
-                        thermal_optics=inputs.soil.thermal_optics,
-                        hotspot=inputs.hotspot,
-                        nlayers=inputs.nlayers,
-                    )
-                    for name in thermal_profile_outputs:
-                        thermal_profile_outputs[name].append(getattr(profiles, name))
+            if thermal_profile_outputs is not None:
+                profiles = self.thermal_model.profiles(
+                    inputs.lai,
+                    inputs.tts,
+                    inputs.tto,
+                    inputs.psi,
+                    energy.Tcu,
+                    energy.Tch,
+                    energy.Tsu,
+                    energy.Tsh,
+                    thermal_optics=inputs.soil.thermal_optics,
+                    hotspot=inputs.hotspot,
+                    nlayers=inputs.nlayers,
+                )
+                for name in thermal_profile_outputs:
+                    self._append_output(thermal_profile_outputs, name, getattr(profiles, name), assembly)
 
         datasets: list[xr.Dataset] = []
         components: list[str] = []
@@ -2393,10 +2979,11 @@ class ScopeGridRunner:
             datasets.append(dataset)
             components.append(component)
 
-        _add(
-            self._outputs_to_dataset(data_module, self._concat_outputs(energy_outputs), product="energy_balance"),
-            "energy_balance",
-        )
+        if energy_outputs is not None:
+            _add(
+                self._outputs_to_dataset(data_module, self._concat_outputs(energy_outputs), product="energy_balance"),
+                "energy_balance",
+            )
 
         if fluorescence_outputs is not None:
             _add(
@@ -2427,11 +3014,12 @@ class ScopeGridRunner:
             )
 
         if fluorescence_profile_outputs is not None:
+            fluorescence_profile = self._concat_outputs(fluorescence_profile_outputs)
             profile_dataset = self._profile_outputs_to_dataset(
                 data_module,
-                self._concat_outputs(fluorescence_profile_outputs),
+                fluorescence_profile,
                 product="energy_balance_fluorescence_profiles",
-                layer_count=self._profile_layer_count_from_tensor(fluorescence_profile_outputs["Ps"][0]),
+                layer_count=self._profile_layer_count_from_outputs(data_module, fluorescence_profile),
                 variable_dims={
                     "Ps": ("layer_interface",),
                     "Po": ("layer_interface",),
@@ -2475,11 +3063,12 @@ class ScopeGridRunner:
             )
 
         if thermal_profile_outputs is not None:
+            thermal_profile = self._concat_outputs(thermal_profile_outputs)
             profile_dataset = self._profile_outputs_to_dataset(
                 data_module,
-                self._concat_outputs(thermal_profile_outputs),
+                thermal_profile,
                 product="energy_balance_thermal_profiles",
-                layer_count=self._profile_layer_count_from_tensor(thermal_profile_outputs["Ps"][0]),
+                layer_count=self._profile_layer_count_from_outputs(data_module, thermal_profile),
                 variable_dims={
                     "Ps": ("layer_interface",),
                     "Po": ("layer_interface",),
@@ -2896,6 +3485,18 @@ class ScopeGridRunner:
         if tensor.ndim < 2 or tensor.shape[1] < 1:
             raise ValueError("Profile outputs must include a layer-interface axis")
         return int(tensor.shape[1]) - 1
+
+    def _profile_layer_count_from_outputs(
+        self,
+        data_module: ScopeGridDataModule,
+        outputs: Mapping[str, torch.Tensor],
+    ) -> int:
+        if "Ps" in outputs:
+            return self._profile_layer_count_from_tensor(outputs["Ps"])
+        layer_count = self._output_layer_count(data_module, outputs)
+        if layer_count is None:
+            raise ValueError("Profile output assembly requires at least one layer-shaped output")
+        return layer_count
 
     def _accumulate_profile_layer_count(self, expected: int | None, value: torch.Tensor) -> int:
         current = self._profile_layer_count_from_tensor(value)
