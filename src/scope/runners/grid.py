@@ -2657,8 +2657,7 @@ class ScopeGridRunner:
         missing = output_vars.difference(names)
         if missing:
             raise KeyError(
-                "Requested output variables are not available: "
-                f"{sorted(missing)}. Available outputs: {list(names)}"
+                f"Requested output variables are not available: {sorted(missing)}. Available outputs: {list(names)}"
             )
         return tuple(name for name in names if name in output_vars)
 
@@ -2772,9 +2771,7 @@ class ScopeGridRunner:
         )
         fluorescence_directional_outputs = (
             _init(_selected_or_all(("LoF_",), prefix="energy_balance_fluorescence_directional"))
-            if calc_fluor
-            and calc_directional
-            and _wanted(("LoF_",), prefix="energy_balance_fluorescence_directional")
+            if calc_fluor and calc_directional and _wanted(("LoF_",), prefix="energy_balance_fluorescence_directional")
             else None
         )
         thermal_directional_outputs = (
