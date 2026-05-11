@@ -18,7 +18,7 @@ from scope.energy import (
     EnergyBalanceOptions,
     EnergyBalanceSoil,
 )
-from scope.runners.grid import ScopeGridRunner
+from scope.runners.grid import ScopeGridRunner, _TensorBatchDataModule
 from scope.spectral.fluspect import FluspectModel, LeafBioBatch, OptiPar, SpectralGrids
 from scope.spectral.loaders import load_soil_spectra
 
@@ -528,6 +528,88 @@ def test_scope_grid_runner_iter_scope_dataset_tensors_detaches_chunk_outputs():
 
     assert [chunk["LoF_"].shape[0] for chunk in chunks] == [2, 1]
     assert all(chunk["LoF_"].grad_fn is None for chunk in chunks)
+
+
+def test_scope_grid_runner_iter_scope_tensors_calc_ebal_single_chunk_bypasses_chunk_iteration(monkeypatch):
+    runner, _ = _build_execution_mode_runner(dtype=torch.float64)
+    inputs = {"LAI": torch.ones(3, dtype=torch.float64)}
+    observed_batch_sizes = []
+
+    def fail_iter_batches(self):
+        raise AssertionError("single-chunk calc_ebal fast path should not iterate outer chunks")
+
+    def fake_run_named_tensor_workflow(data_module, **kwargs):
+        observed_batch_sizes.append(data_module.batch_size())
+        return {"Tcu": torch.zeros(data_module.batch_size(), 4, dtype=torch.float64)}
+
+    monkeypatch.setattr(_TensorBatchDataModule, "iter_batches", fail_iter_batches)
+    monkeypatch.setattr(runner, "_run_named_tensor_workflow", fake_run_named_tensor_workflow)
+
+    chunks = list(runner.iter_scope_tensors(inputs, scope_options={"calc_ebal": 1}, chunk_size=3))
+
+    assert observed_batch_sizes == [3]
+    assert [chunk["Tcu"].shape[0] for chunk in chunks] == [3]
+
+
+def test_scope_grid_runner_iter_scope_dataset_tensors_calc_ebal_single_chunk_uses_full_batch_fast_path(monkeypatch):
+    dtype = torch.float64
+    runner, spectral = _build_execution_mode_runner(dtype=dtype)
+    dataset = _build_coupled_execution_mode_dataset(spectral)
+    module_batch_size = 3
+    module = _build_execution_mode_module(dataset, dtype=dtype, chunk_size=module_batch_size)
+    varmap = {name: name for name in dataset.data_vars}
+    observed_batch_sizes = []
+
+    assert module.batch_size() == module_batch_size
+
+    def fail_iter_batches(self):
+        raise AssertionError("single-chunk calc_ebal fast path should not iterate dataset chunks")
+
+    def fake_run_scope_tensor_workflow(data_module, **kwargs):
+        observed_batch_sizes.append(data_module.batch_size())
+        return {"Tcu": torch.zeros(data_module.batch_size(), 4, dtype=dtype)}
+
+    monkeypatch.setattr(ScopeGridDataModule, "iter_batches", fail_iter_batches)
+    monkeypatch.setattr(runner, "_run_scope_tensor_workflow", fake_run_scope_tensor_workflow)
+
+    chunks = list(
+        runner.iter_scope_dataset_tensors(
+            module,
+            varmap=varmap,
+            scope_options={"calc_ebal": 1},
+            nlayers=4,
+        )
+    )
+
+    assert observed_batch_sizes == [3]
+    assert [chunk["Tcu"].shape[0] for chunk in chunks] == [3]
+
+
+def test_scope_grid_runner_iter_scope_dataset_tensors_calc_ebal_multi_chunk_still_streams(monkeypatch):
+    dtype = torch.float64
+    runner, spectral = _build_execution_mode_runner(dtype=dtype)
+    dataset = _build_coupled_execution_mode_dataset(spectral)
+    module = _build_execution_mode_module(dataset, dtype=dtype, chunk_size=2)
+    varmap = {name: name for name in dataset.data_vars}
+    observed_batch_sizes = []
+
+    def fake_run_scope_tensor_workflow(data_module, **kwargs):
+        observed_batch_sizes.append(data_module.batch_size())
+        return {"Tcu": torch.zeros(data_module.batch_size(), 4, dtype=dtype)}
+
+    monkeypatch.setattr(runner, "_run_scope_tensor_workflow", fake_run_scope_tensor_workflow)
+
+    chunks = list(
+        runner.iter_scope_dataset_tensors(
+            module,
+            varmap=varmap,
+            scope_options={"calc_ebal": 1},
+            nlayers=4,
+        )
+    )
+
+    assert observed_batch_sizes == [2, 1]
+    assert [chunk["Tcu"].shape[0] for chunk in chunks] == [2, 1]
 
 
 def test_scope_grid_runner_energy_balance_preserves_resistance_and_canopy_gradients():

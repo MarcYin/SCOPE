@@ -95,6 +95,12 @@ class ScopeGridDataModule:
             total *= int(self.dataset.sizes[dim])
         return total
 
+    def as_tensor_batch(self) -> Mapping[str, torch.Tensor]:
+        missing = [var for var in self.required_vars if var not in self.dataset]
+        if missing:
+            raise KeyError(f"Dataset missing required variables: {missing}")
+        return {var: self._to_tensor(self.dataset[var]) for var in self.required_vars}
+
     def iter_batches(self) -> Iterable[Mapping[str, torch.Tensor]]:
         missing = [var for var in self.required_vars if var not in self.dataset]
         if missing:

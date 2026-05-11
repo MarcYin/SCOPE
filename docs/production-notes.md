@@ -90,6 +90,8 @@ for outputs in runner.iter_scope_dataset_tensors(
 
 For direct tensor inputs, use `runner.iter_scope_tensors(...)` the same way. If the objective is a global mean or sum, weight each chunk loss by its contribution to the full objective before calling `backward()`. Avoid storing chunk outputs that still have `grad_fn`; keeping those tensors alive also keeps their graphs alive.
 
+When `calc_ebal=1` and the configured batch fits in a single chunk, the streaming tensor APIs use a single-chunk fast path. That path preserves the one-loss backward pattern for small optimisation slices while avoiding the extra outer chunk wrapper that is useful only for larger grids.
+
 ## Release and Distribution
 
 For maintainers, the repository now has separate operational paths for packaging and docs deployment:

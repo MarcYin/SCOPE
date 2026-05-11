@@ -1763,6 +1763,26 @@ class ScopeGridRunner:
             non_batch_1d_vars=self._non_batch_1d_tensor_vars(resolved_varmap),
             non_batch_vars=self._non_batch_tensor_vars(resolved_varmap),
         )
+        if self._scope_option_flag(data_module, scope_options, "calc_ebal") and self._has_single_configured_chunk(
+            data_module
+        ):
+            yield self._run_named_tensor_workflow(
+                data_module,
+                workflow="scope" if workflow is None else workflow,
+                varmap=resolved_varmap,
+                scope_options=scope_options,
+                energy_options=energy_options,
+                biochem_options=biochem_options,
+                directional_tto=directional_tto,
+                directional_psi=directional_psi,
+                hotspot_var=hotspot_var,
+                nlayers=nlayers,
+                output_vars=output_vars,
+                output_device=output_device,
+                detach_outputs=detach,
+            )
+            return
+
         for batch in data_module.iter_batches():
             chunk_module = _TensorBatchDataModule(
                 batch,
@@ -1816,6 +1836,26 @@ class ScopeGridRunner:
                 directional_tto=directional_tto,
                 directional_psi=directional_psi,
             )
+
+        if self._scope_option_flag(data_module, scope_options, "calc_ebal") and self._has_single_configured_chunk(
+            data_module
+        ):
+            chunk_module = _TensorBatchDataModule(data_module.as_tensor_batch(), attrs=data_module.dataset.attrs)
+            yield self._run_scope_tensor_workflow(
+                chunk_module,
+                varmap=varmap,
+                scope_options=scope_options,
+                energy_options=energy_options,
+                biochem_options=biochem_options,
+                directional_tto=directional_tto,
+                directional_psi=directional_psi,
+                hotspot_var=hotspot_var,
+                nlayers=nlayers,
+                output_vars=output_vars,
+                output_device=output_device,
+                detach_outputs=detach,
+            )
+            return
 
         for batch in data_module.iter_batches():
             chunk_module = _TensorBatchDataModule(batch, attrs=data_module.dataset.attrs)
@@ -3393,6 +3433,11 @@ class ScopeGridRunner:
         if scope_options and name in scope_options:
             return self._as_bool(scope_options[name], default=default)
         return self._as_bool(data_module.dataset.attrs.get(name, default), default=default)
+
+    def _has_single_configured_chunk(self, data_module) -> bool:
+        if isinstance(data_module, _TensorBatchDataModule):
+            return len(data_module._chunks()) == 1
+        return len(data_module.config.chunks(data_module.batch_size())) == 1
 
     def _scope_option_int(
         self,
