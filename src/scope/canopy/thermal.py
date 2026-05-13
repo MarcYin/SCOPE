@@ -171,23 +171,33 @@ class CanopyThermalRadianceModel:
         Hc = Hcsu * transfer.Ps[:, :nl].unsqueeze(-1) + Hcsh * (1.0 - transfer.Ps[:, :nl]).unsqueeze(-1)
         Hs = Hssu * transfer.Ps[:, -1].unsqueeze(-1) + Hssh * (1.0 - transfer.Ps[:, -1]).unsqueeze(-1)
 
-        Emin = torch.zeros((batch, nl + 1, wlT.numel()), device=device, dtype=dtype)
-        Eplu = torch.zeros_like(Emin)
-        U = torch.zeros_like(Emin)
-        Y = torch.zeros((batch, nl, wlT.numel()), device=device, dtype=dtype)
-        U[:, -1, :] = Hs
+        # Per-layer backward + forward sweeps. In-place slice-assignment on
+        # pre-allocated Y / U / Emin / Eplu is autograd-hostile (see the
+        # matching pattern in canopy/fluorescence.py and canopy/layered_rt.py).
+        # Build per-layer tensors as lists and stack once at the end.
+        zero_layer = torch.zeros((batch, wlT.numel()), device=device, dtype=dtype)
+        U_layers: list[torch.Tensor | None] = [None] * (nl + 1)
+        Y_layers: list[torch.Tensor | None] = [None] * nl
+        U_layers[nl] = Hs
         for layer in range(nl - 1, -1, -1):
             denom = (1.0 - transfer.rho_dd[:, layer, :] * transfer.R_dd[:, layer + 1, :]).clamp(min=1e-9)
             source = Hc[:, layer, :] * transfer.iLAI.unsqueeze(-1)
-            Y[:, layer, :] = (transfer.rho_dd[:, layer, :] * U[:, layer + 1, :] + source) / denom
-            U[:, layer, :] = (
-                transfer.tau_dd[:, layer, :] * (transfer.R_dd[:, layer + 1, :] * Y[:, layer, :] + U[:, layer + 1, :])
+            Y_layers[layer] = (transfer.rho_dd[:, layer, :] * U_layers[layer + 1] + source) / denom
+            U_layers[layer] = (
+                transfer.tau_dd[:, layer, :] * (transfer.R_dd[:, layer + 1, :] * Y_layers[layer] + U_layers[layer + 1])
                 + source
             )
+        U = torch.stack(U_layers, dim=1)
+
+        Emin_layers: list[torch.Tensor] = [zero_layer]
+        Eplu_layers: list[torch.Tensor] = []
         for layer in range(nl):
-            Emin[:, layer + 1, :] = transfer.Xdd[:, layer, :] * Emin[:, layer, :] + Y[:, layer, :]
-            Eplu[:, layer, :] = transfer.R_dd[:, layer, :] * Emin[:, layer, :] + U[:, layer, :]
-        Eplu[:, -1, :] = transfer.R_dd[:, -1, :] * Emin[:, -1, :] + Hs
+            Emin_layers.append(transfer.Xdd[:, layer, :] * Emin_layers[layer] + Y_layers[layer])
+            Eplu_layers.append(transfer.R_dd[:, layer, :] * Emin_layers[layer] + U_layers[layer])
+        # Soil boundary on Eplu at the last interface.
+        Eplu_layers.append(transfer.R_dd[:, -1, :] * Emin_layers[nl] + Hs)
+        Emin = torch.stack(Emin_layers, dim=1)
+        Eplu = torch.stack(Eplu_layers, dim=1)
 
         Po = transfer.Po[:, :nl].unsqueeze(-1)
         Pso = transfer.Pso[:, :nl].unsqueeze(-1)

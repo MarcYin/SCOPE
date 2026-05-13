@@ -128,22 +128,34 @@ class LayeredCanopyTransportModel:
         rho_sd = (sb * iLAI.unsqueeze(-1)).unsqueeze(1).expand(-1, nlayers, -1)
         rho_dd = (sigb * iLAI.unsqueeze(-1)).unsqueeze(1).expand(-1, nlayers, -1)
 
-        R_sd = torch.zeros((batch, nlayers + 1, nwl), device=device, dtype=dtype)
-        R_dd = torch.zeros_like(R_sd)
-        Xsd = torch.zeros((batch, nlayers, nwl), device=device, dtype=dtype)
-        Xdd = torch.zeros_like(Xsd)
-        R_sd[:, -1, :] = soil
-        R_dd[:, -1, :] = soil
+        # Per-layer backward sweep. In-place slice-assignment on pre-allocated
+        # R_sd / R_dd / Xsd / Xdd is autograd-hostile: each layer reads slices
+        # that the previous iteration wrote (R_sd[:, layer + 1, :] and
+        # R_dd[:, layer + 1, :]), and PyTorch's version-counter guard refuses
+        # to backward through tensors whose storage was mutated after their
+        # gradient graph was registered. Build per-layer tensors as lists and
+        # stack once at the end — same numerical result, immutable
+        # intermediates in the autograd graph.
+        R_sd_layers: list[torch.Tensor | None] = [None] * (nlayers + 1)
+        R_dd_layers: list[torch.Tensor | None] = [None] * (nlayers + 1)
+        Xsd_layers: list[torch.Tensor | None] = [None] * nlayers
+        Xdd_layers: list[torch.Tensor | None] = [None] * nlayers
+        R_sd_layers[nlayers] = soil
+        R_dd_layers[nlayers] = soil
         for layer in range(nlayers - 1, -1, -1):
-            dnorm = (1.0 - rho_dd[:, layer, :] * R_dd[:, layer + 1, :]).clamp(min=1e-9)
-            Xsd[:, layer, :] = (
-                tau_sd[:, layer, :] + tau_ss[:, layer].unsqueeze(-1) * R_sd[:, layer + 1, :] * rho_dd[:, layer, :]
+            dnorm = (1.0 - rho_dd[:, layer, :] * R_dd_layers[layer + 1]).clamp(min=1e-9)
+            Xsd_layers[layer] = (
+                tau_sd[:, layer, :] + tau_ss[:, layer].unsqueeze(-1) * R_sd_layers[layer + 1] * rho_dd[:, layer, :]
             ) / dnorm
-            Xdd[:, layer, :] = tau_dd[:, layer, :] / dnorm
-            R_sd[:, layer, :] = rho_sd[:, layer, :] + tau_dd[:, layer, :] * (
-                R_sd[:, layer + 1, :] * tau_ss[:, layer].unsqueeze(-1) + R_dd[:, layer + 1, :] * Xsd[:, layer, :]
+            Xdd_layers[layer] = tau_dd[:, layer, :] / dnorm
+            R_sd_layers[layer] = rho_sd[:, layer, :] + tau_dd[:, layer, :] * (
+                R_sd_layers[layer + 1] * tau_ss[:, layer].unsqueeze(-1) + R_dd_layers[layer + 1] * Xsd_layers[layer]
             )
-            R_dd[:, layer, :] = rho_dd[:, layer, :] + tau_dd[:, layer, :] * R_dd[:, layer + 1, :] * Xdd[:, layer, :]
+            R_dd_layers[layer] = rho_dd[:, layer, :] + tau_dd[:, layer, :] * R_dd_layers[layer + 1] * Xdd_layers[layer]
+        R_sd = torch.stack(R_sd_layers, dim=1)
+        R_dd = torch.stack(R_dd_layers, dim=1)
+        Xsd = torch.stack(Xsd_layers, dim=1)
+        Xdd = torch.stack(Xdd_layers, dim=1)
 
         xl = torch.cat(
             [
@@ -211,21 +223,27 @@ class LayeredCanopyTransportModel:
         Esky = self.sail._ensure_2d(Esky_, target_shape=Esun.shape)
         batch, nwl = Esun.shape
 
-        Es = torch.zeros((batch, transfer.nlayers + 1, nwl), device=Esun.device, dtype=Esun.dtype)
-        Emin = torch.zeros_like(Es)
-        Eplu = torch.zeros_like(Es)
-        Es[:, 0, :] = Esun
-        Emin[:, 0, :] = Esky
-
+        # Per-layer forward sweep — same autograd-hostile slice-assign pattern
+        # as the backward sweep above; build per-layer tensors as lists and
+        # stack once at the end.
+        Es_layers: list[torch.Tensor] = [Esun]
+        Emin_layers: list[torch.Tensor] = [Esky]
+        Eplu_layers: list[torch.Tensor] = []
         for layer in range(transfer.nlayers):
-            Es[:, layer + 1, :] = transfer.Xss[:, layer].unsqueeze(-1) * Es[:, layer, :]
-            Emin[:, layer + 1, :] = (
-                transfer.Xsd[:, layer, :] * Es[:, layer, :] + transfer.Xdd[:, layer, :] * Emin[:, layer, :]
+            Es_layers.append(transfer.Xss[:, layer].unsqueeze(-1) * Es_layers[layer])
+            Emin_layers.append(
+                transfer.Xsd[:, layer, :] * Es_layers[layer] + transfer.Xdd[:, layer, :] * Emin_layers[layer]
             )
-            Eplu[:, layer, :] = (
-                transfer.R_sd[:, layer, :] * Es[:, layer, :] + transfer.R_dd[:, layer, :] * Emin[:, layer, :]
+            Eplu_layers.append(
+                transfer.R_sd[:, layer, :] * Es_layers[layer] + transfer.R_dd[:, layer, :] * Emin_layers[layer]
             )
-        Eplu[:, -1, :] = transfer.R_dd[:, -1, :] * (Es[:, -1, :] + Emin[:, -1, :])
+        # Boundary at layer == nlayers: Eplu reflects total downwelling off the
+        # soil at the last interface. Use the soil-side R_dd[:, -1, :] times
+        # the sum of Es and Emin at that layer.
+        Eplu_layers.append(transfer.R_dd[:, -1, :] * (Es_layers[transfer.nlayers] + Emin_layers[transfer.nlayers]))
+        Es = torch.stack(Es_layers, dim=1)
+        Emin = torch.stack(Emin_layers, dim=1)
+        Eplu = torch.stack(Eplu_layers, dim=1)
         return LayerFluxProfiles(Es_=Es, Emin_=Emin, Eplu_=Eplu)
 
     def _finite_layer_average(self, extinction: torch.Tensor, lai: torch.Tensor, dx: torch.Tensor) -> torch.Tensor:
