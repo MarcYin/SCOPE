@@ -684,21 +684,44 @@ class CanopyFluorescenceModel:
 
         batch = leafopt.Mb.shape[0]
         nf = wlF.numel()
-        Fmin = torch.zeros((batch, nl + 1, nf), device=wlF.device, dtype=wlF.dtype)
-        Fplu = torch.zeros_like(Fmin)
-        U = torch.zeros_like(Fmin)
-        Y = torch.zeros((batch, nl, nf), device=wlF.device, dtype=wlF.dtype)
+        zero_layer = torch.zeros((batch, nf), device=wlF.device, dtype=wlF.dtype)
+
+        # Backward sweep — fill Y (per-layer) and U (per-layer, plus a zero
+        # boundary at layer == nl). Previous in-place slice-assignment on
+        # pre-allocated Y / U / Fmin / Fplu tensors broke autograd: the
+        # downstream layer reads a slice that the previous iteration wrote,
+        # and PyTorch's version-counter guard refuses to backward through
+        # tensors whose storage was mutated after their gradient graph was
+        # registered. Building per-layer tensors as a Python list and
+        # stacking once at the end gives the same numerical result while
+        # keeping every intermediate tensor immutable in the autograd graph.
+        U_layers: list[torch.Tensor | None] = [None] * (nl + 1)
+        Y_layers: list[torch.Tensor | None] = [None] * nl
+        U_layers[nl] = zero_layer
         for layer in range(nl - 1, -1, -1):
             denom = (1.0 - transport_f.rho_dd[:, layer, :] * transport_f.R_dd[:, layer + 1, :]).clamp(min=1e-9)
-            Y[:, layer, :] = (transport_f.rho_dd[:, layer, :] * U[:, layer + 1, :] + Femmin[:, layer, :]) / denom
-            U[:, layer, :] = (
+            Y_layers[layer] = (transport_f.rho_dd[:, layer, :] * U_layers[layer + 1] + Femmin[:, layer, :]) / denom
+            U_layers[layer] = (
                 transport_f.tau_dd[:, layer, :]
-                * (transport_f.R_dd[:, layer + 1, :] * Y[:, layer, :] + U[:, layer + 1, :])
+                * (transport_f.R_dd[:, layer + 1, :] * Y_layers[layer] + U_layers[layer + 1])
                 + Femplu[:, layer, :]
             )
+        U = torch.stack(U_layers, dim=1)
+        Y = torch.stack(Y_layers, dim=1)
+
+        # Forward sweep — fill Fmin (per-layer, including the zero initial)
+        # and Fplu (per-layer; layer == nl is left at zero to preserve the
+        # (batch, nl + 1, nf) shape of the original implementation so the
+        # downstream code that indexes Fmin[:, :nl, :] / Fmin[:, -1, :] /
+        # Fplu[:, 0, :] / Fplu[:, :nl, :] keeps working unchanged).
+        Fmin_layers: list[torch.Tensor] = [zero_layer]
+        Fplu_layers: list[torch.Tensor] = []
         for layer in range(nl):
-            Fmin[:, layer + 1, :] = transport_f.Xdd[:, layer, :] * Fmin[:, layer, :] + Y[:, layer, :]
-            Fplu[:, layer, :] = transport_f.R_dd[:, layer, :] * Fmin[:, layer, :] + U[:, layer, :]
+            Fmin_layers.append(transport_f.Xdd[:, layer, :] * Fmin_layers[layer] + Y_layers[layer])
+            Fplu_layers.append(transport_f.R_dd[:, layer, :] * Fmin_layers[layer] + U_layers[layer])
+        Fplu_layers.append(zero_layer)
+        Fmin = torch.stack(Fmin_layers, dim=1)
+        Fplu = torch.stack(Fplu_layers, dim=1)
 
         Po = transport_f.Po[:, :nl].unsqueeze(-1)
         Pso = transport_f.Pso[:, :nl].unsqueeze(-1)
