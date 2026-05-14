@@ -652,6 +652,43 @@ def test_scope_grid_runner_energy_balance_preserves_resistance_and_canopy_gradie
         assert torch.any(torch.abs(tensor.grad) > 0)
 
 
+def test_scope_grid_runner_energy_truncate_backprop_option_reaches_solve():
+    device = torch.device("cpu")
+    dtype = torch.float64
+    runner, spectral = _build_execution_mode_runner(device=device, dtype=dtype)
+    dataset = _build_coupled_execution_mode_dataset(spectral)
+    module = _build_execution_mode_module(dataset, device=device, dtype=dtype, chunk_size=3)
+
+    resolved = runner._scope_energy_options(
+        module,
+        scope_options={
+            "calc_ebal": 1,
+            "energy_truncate_backprop": 1,
+            "energy_max_iter": 3,
+        },
+        energy_options=None,
+    )
+    assert resolved is not None
+    assert resolved.truncate_backprop is True
+    assert resolved.max_iter == 3
+
+    aliased = runner._scope_energy_options(
+        module,
+        scope_options={"truncate_backprop": "true"},
+        energy_options=None,
+    )
+    assert aliased is not None
+    assert aliased.truncate_backprop is True
+
+    default_off = runner._scope_energy_options(
+        module,
+        scope_options={"energy_max_iter": 2},
+        energy_options=None,
+    )
+    assert default_off is not None
+    assert default_off.truncate_backprop is False
+
+
 def test_scope_grid_runner_matches_manual():
     device = torch.device("cpu")
     dtype = torch.float64

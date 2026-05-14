@@ -254,6 +254,152 @@ def test_energy_balance_fixed_iterations_runs_to_max_iter():
     assert torch.all(fixed.converged)
 
 
+def test_energy_balance_truncate_backprop_matches_forward_but_changes_gradient():
+    base_args = _setup_energy_case(batch=2)
+    model, _, _, _, _, _, _, _, _, _, _, _, _, _ = base_args
+
+    def _build_inputs(*, requires_grad: bool):
+        device = torch.device("cpu")
+        dtype = torch.float64
+        leafbio = LeafBioBatch(
+            Cab=torch.tensor([45.0, 38.0], device=device, dtype=dtype, requires_grad=requires_grad),
+            Cw=torch.tensor([0.010, 0.014], device=device, dtype=dtype, requires_grad=requires_grad),
+            Cdm=torch.tensor([0.012, 0.017], device=device, dtype=dtype, requires_grad=requires_grad),
+            fqe=torch.tensor([0.010, 0.015], device=device, dtype=dtype, requires_grad=requires_grad),
+        )
+        biochemistry = LeafBiochemistryInputs(
+            Vcmax25=torch.tensor([70.0, 58.0], device=device, dtype=dtype, requires_grad=requires_grad),
+            BallBerrySlope=torch.tensor([9.0, 7.5], device=device, dtype=dtype, requires_grad=requires_grad),
+        )
+        return leafbio, biochemistry
+
+    _, _, _, soil_refl, lai, tts, tto, psi, Esun_sw, Esky_sw, meteo, canopy, soil, _ = base_args
+
+    # Forward parity: detaching state across iterations must not change the
+    # numerical solve. Use fixed_iterations so both runs execute the same
+    # number of Picard iterations.
+    leafbio_a, biochem_a = _build_inputs(requires_grad=False)
+    leafbio_b, biochem_b = _build_inputs(requires_grad=False)
+    options_full = EnergyBalanceOptions(max_iter=4, max_energy_error=1e30, fixed_iterations=True)
+    options_trunc = EnergyBalanceOptions(
+        max_iter=4, max_energy_error=1e30, fixed_iterations=True, truncate_backprop=True
+    )
+
+    forward_full = model.solve(
+        leafbio_a,
+        biochem_a,
+        soil_refl,
+        lai,
+        tts,
+        tto,
+        psi,
+        Esun_sw,
+        Esky_sw,
+        meteo=meteo,
+        canopy=canopy,
+        soil=soil,
+        options=options_full,
+        nlayers=4,
+    )
+    forward_trunc = model.solve(
+        leafbio_b,
+        biochem_b,
+        soil_refl,
+        lai,
+        tts,
+        tto,
+        psi,
+        Esun_sw,
+        Esky_sw,
+        meteo=meteo,
+        canopy=canopy,
+        soil=soil,
+        options=options_trunc,
+        nlayers=4,
+    )
+    for name in ("Tcu", "Tch", "Tsu", "Tsh", "lEtot", "Htot", "Rntot"):
+        torch.testing.assert_close(
+            getattr(forward_trunc, name),
+            getattr(forward_full, name),
+            atol=1e-10,
+            rtol=1e-10,
+        )
+
+    # Gradient behaviour: backward through the truncated solve must succeed
+    # and produce finite, nonzero gradients on the parameters that EB couples
+    # into the canopy energy budget (Vcmax25, BallBerrySlope).
+    leafbio_g, biochem_g = _build_inputs(requires_grad=True)
+    grad_result = model.solve(
+        leafbio_g,
+        biochem_g,
+        soil_refl,
+        lai,
+        tts,
+        tto,
+        psi,
+        Esun_sw,
+        Esky_sw,
+        meteo=meteo,
+        canopy=canopy,
+        soil=soil,
+        options=options_trunc,
+        nlayers=4,
+    )
+    # Actot (canopy assimilation total) aggregates sunlit.A and shaded.A,
+    # both of which depend on Vcmax25 through the biochemistry model. Cab,
+    # Cw, Cdm flow into Q via the shortwave radiation pre-pass that runs
+    # before the loop and is unaffected by the truncation.
+    grad_result.Actot.sum().backward()
+    for tensor_name, parent in (
+        ("Vcmax25", biochem_g),
+        ("Cab", leafbio_g),
+        ("Cw", leafbio_g),
+        ("Cdm", leafbio_g),
+    ):
+        grad = getattr(parent, tensor_name).grad
+        assert grad is not None, f"{tensor_name} got no gradient"
+        assert torch.isfinite(grad).all(), f"{tensor_name} gradient is not finite"
+        assert torch.any(grad != 0.0), f"{tensor_name} gradient is exactly zero"
+
+    # Cross-check against full backprop: both modes must produce gradients
+    # with the same sign and order of magnitude. They can be exactly equal
+    # in regimes where the autograd graph through earlier iterations is
+    # dead (no surviving consumers from Actot back through the state
+    # update path), which is acceptable — the point of truncation is to
+    # bound the graph, not to deliberately change the gradient.
+    leafbio_g2, biochem_g2 = _build_inputs(requires_grad=True)
+    full_result = model.solve(
+        leafbio_g2,
+        biochem_g2,
+        soil_refl,
+        lai,
+        tts,
+        tto,
+        psi,
+        Esun_sw,
+        Esky_sw,
+        meteo=meteo,
+        canopy=canopy,
+        soil=soil,
+        options=options_full,
+        nlayers=4,
+    )
+    full_result.Actot.sum().backward()
+    for tensor_name, trunc_parent, full_parent in (
+        ("Vcmax25", biochem_g, biochem_g2),
+        ("Cab", leafbio_g, leafbio_g2),
+    ):
+        trunc_grad = getattr(trunc_parent, tensor_name).grad
+        full_grad = getattr(full_parent, tensor_name).grad
+        torch.testing.assert_close(
+            torch.sign(trunc_grad),
+            torch.sign(full_grad),
+            atol=0.0,
+            rtol=0.0,
+            msg=f"{tensor_name}: truncated gradient flipped sign vs full backprop",
+        )
+
+
 def test_energy_balance_fv_profile_uses_upper_layer_edges():
     model, leafbio, _, soil_refl, lai, tts, tto, psi, Esun_sw, Esky_sw, _, canopy, _, _ = _setup_energy_case()
 

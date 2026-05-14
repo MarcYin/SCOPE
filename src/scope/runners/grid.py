@@ -3479,6 +3479,7 @@ class ScopeGridRunner:
                 "initial_sunlit_leaf_offset",
             ),
             "initial_soil_offset": ("energy_initial_soil_offset", "initial_soil_offset"),
+            "truncate_backprop": ("energy_truncate_backprop", "truncate_backprop"),
         }
         values: dict[str, object] = {}
         for field_name, field_aliases in aliases.items():
@@ -3508,6 +3509,10 @@ class ScopeGridRunner:
                 values.get("initial_sunlit_leaf_offset", defaults.initial_sunlit_leaf_offset)
             ),
             initial_soil_offset=float(values.get("initial_soil_offset", defaults.initial_soil_offset)),
+            truncate_backprop=self._as_bool(
+                values.get("truncate_backprop", defaults.truncate_backprop),
+                default=defaults.truncate_backprop,
+            ),
         )
 
     def _as_bool(self, value: object, *, default: bool) -> bool:

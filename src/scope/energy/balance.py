@@ -63,6 +63,7 @@ class EnergyBalanceOptions:
     initial_shaded_leaf_offset: float = 0.1
     initial_sunlit_leaf_offset: float = 0.3
     initial_soil_offset: float = 3.0
+    truncate_backprop: bool = False
 
 
 @dataclass(slots=True)
@@ -526,6 +527,24 @@ class CanopyEnergyBalanceModel:
             soil_t = torch.where(torch.abs(soil_t) > 100.0, ta.view(batch, 1), soil_t)
             Tsh = soil_t[:, 0]
             Tsu = soil_t[:, 1]
+
+            if opts.truncate_backprop:
+                # Phantom-gradient / 1-step truncated BPTT through the Picard
+                # fixed-point: detach the propagated state so the next iteration
+                # builds a fresh autograd subgraph. Each iteration's outputs
+                # still receive gradient via shortwave, lai, biochemistry, and
+                # other external tensors, but the chain across iterations is
+                # cut. Backward stays bounded to one iteration's ops regardless
+                # of how many Picard iterations the forward took.
+                Cch = Cch.detach()
+                Ccu = Ccu.detach()
+                ech = ech.detach()
+                ecu = ecu.detach()
+                L = L.detach()
+                Tch = Tch.detach()
+                Tcu = Tcu.detach()
+                Tsh = Tsh.detach()
+                Tsu = Tsu.detach()
 
         if (
             sunlit is None

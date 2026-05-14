@@ -92,6 +92,8 @@ For direct tensor inputs, use `runner.iter_scope_tensors(...)` the same way. If 
 
 When `calc_ebal=1` and the configured batch fits in a single chunk, the streaming tensor APIs use a single-chunk fast path. That path preserves the one-loss backward pattern for small optimisation slices while avoiding the extra outer chunk wrapper that is useful only for larger grids.
 
+For multi-chunk `calc_ebal=1` runs where the configured chunk size does not cover the whole batch, set `truncate_backprop=True` on `EnergyBalanceOptions` (or `energy_truncate_backprop=1` / `truncate_backprop=1` in `scope_options` and dataset attrs). The Picard energy-balance state (`Cc`, `eb`, `Tcu`, `Tch`, `Tsu`, `Tsh`, `L`) is detached at each iteration boundary, so the autograd graph that backward must traverse stays bounded to one iteration's biochem / thermal / heat-flux operations regardless of how many Picard iterations the forward took. This is the 1-step truncated BPTT ("phantom gradient") approximation that is standard for fixed-point iterations: at convergence the iterate is independent of the trajectory that produced it, so the gradient through earlier iterations is small and the truncation is a faithful approximation of the implicit gradient. Forward output is bitwise identical to the full-backprop solve — only the autograd graph that backward walks differs.
+
 ## Release and Distribution
 
 For maintainers, the repository now has separate operational paths for packaging and docs deployment:
