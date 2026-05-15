@@ -83,6 +83,41 @@ def test_leaf_biochemistry_iterative_intercept_solves_ball_berry_fixed_point():
     assert result.fcount > 1
 
 
+def test_leaf_biochemistry_vectorised_ci_solver_satisfies_ball_berry_fixed_point():
+    """Opt-in vectorised _solve_ci must produce a Ball-Berry fixed point.
+
+    The vectorised path uses a batched no_grad Picard iteration instead of
+    per-cell scalar Brent. Different convergence trajectory + multiple roots
+    in the Ball-Berry × Farquhar coupling mean the converged Ci can differ
+    from scalar Brent for some cells, so this path is opt-in and not used
+    by the MATLAB benchmark fixtures. What we *do* require is that whatever
+    Ci it returns is a fixed point of the Ball-Berry equation to high
+    precision — i.e. ci_next == ci_in once converged.
+    """
+    model = LeafBiochemistryModel(dtype=torch.float64)
+    leafbio, meteo = _make_c3_inputs(intercept=0.01)
+
+    result = model(
+        leafbio,
+        meteo,
+        options=BiochemicalOptions(ci_tol=1e-10, max_iter=120, vectorised_ci_solver=True),
+    )
+
+    ppm2bar = 1e-6 * (meteo.p * 1e-3)
+    ci_bar = result.Ci * ppm2bar
+    cs_bar = meteo.Cs * ppm2bar
+    ci_next = model._ball_berry(
+        cs_bar,
+        result.RH,
+        result.A * ppm2bar,
+        leafbio.BallBerrySlope,
+        leafbio.BallBerry0,
+        0.3,
+    )
+    assert torch.allclose(ci_bar, ci_next, atol=2e-10, rtol=1e-10)
+    assert result.fcount > 1
+
+
 def test_leaf_biochemistry_c4_path_returns_finite_fluxes():
     model = LeafBiochemistryModel(dtype=torch.float64)
     leafbio = LeafBiochemistryInputs(

@@ -62,6 +62,16 @@ class BiochemicalOptions:
     apply_T_corr: bool = True
     ci_tol: float = 1e-7
     max_iter: int = 100
+    # Opt-in vectorised fixed-point solver for `_solve_ci` when
+    # BallBerry0 != 0. Replaces the per-cell scalar Brent loop with a
+    # batched no_grad Picard iteration; ~40x faster on production-size
+    # batches (calc_ebal=1 workflows in particular) but converges to a
+    # slightly different fixed point than scalar Brent — the Ball-Berry
+    # × Farquhar coupling can have multiple physically-valid roots, and
+    # the two methods select different ones in some regimes. Default
+    # False because the MATLAB benchmark fixtures were generated against
+    # the scalar Brent path.
+    vectorised_ci_solver: bool = False
 
 
 @dataclass(slots=True)
@@ -250,6 +260,7 @@ class LeafBiochemistryModel:
             Ke=Ke,
             tol=opts.ci_tol,
             max_iter=opts.max_iter,
+            vectorised=opts.vectorised_ci_solver,
         )
         assimilation = self._compute_assimilation(
             Ci=ci_solution["Ci"],
@@ -399,11 +410,46 @@ class LeafBiochemistryModel:
         Ke: torch.Tensor,
         tol: float,
         max_iter: int,
+        vectorised: bool = False,
     ) -> dict[str, torch.Tensor | int]:
         ci_initial = self._ball_berry(Cs, RH, None, BallBerrySlope, BallBerry0, min_ci)
         zero_intercept = BallBerry0 == 0
         if zero_intercept.all():
             return {"Ci": ci_initial, "fcount": 1}
+
+        if not vectorised:
+            # Default path: per-cell scalar Brent. Slow on production-size
+            # batches but produces the exact convergence point the MATLAB
+            # benchmark fixtures were generated against. Opt into the
+            # vectorised fast path via BiochemicalOptions.vectorised_ci_solver.
+            ci = ci_initial.clone()
+            max_fcount = 1
+            solve_indices = torch.nonzero(~zero_intercept, as_tuple=False).reshape(-1)
+            for raw_idx in solve_indices.tolist():
+                idx = int(raw_idx)
+                ci_value, brent_fcount = self._solve_ci_scalar_brent(
+                    Cs=Cs[idx : idx + 1],
+                    RH=RH[idx : idx + 1],
+                    min_ci=min_ci,
+                    BallBerrySlope=BallBerrySlope[idx : idx + 1],
+                    BallBerry0=BallBerry0[idx : idx + 1],
+                    ppm2bar=ppm2bar[idx : idx + 1],
+                    canopy_type=canopy_type,
+                    g_m=g_m[idx : idx + 1],
+                    Vs_C3=Vs_C3[idx : idx + 1],
+                    MM_consts=MM_consts[idx : idx + 1],
+                    Rd=Rd[idx : idx + 1],
+                    Vcmax=Vcmax[idx : idx + 1],
+                    Gamma_star=Gamma_star[idx : idx + 1],
+                    Je=Je[idx : idx + 1],
+                    effcon=effcon[idx : idx + 1],
+                    Ke=Ke[idx : idx + 1],
+                    tol=tol,
+                    max_iter=max_iter,
+                )
+                ci[idx] = ci_value
+                max_fcount = max(max_fcount, brent_fcount)
+            return {"Ci": ci, "fcount": max_fcount}
 
         # Vectorized fixed-point iteration for non-zero-intercept cells. The
         # iteration runs under no_grad because `__call__` re-evaluates
@@ -412,17 +458,30 @@ class LeafBiochemistryModel:
         # autograd via .item() calls).
         #
         # We track a per-cell ``done`` mask so each cell stops updating at the
-        # iteration where its |ci_candidate - ci_work| first drops below tol.
-        # That preserves the per-cell stopping point of the scalar Brent
-        # fallback — the returned Ci is the ci_in for which the residual was
-        # already small, not the iterate after one more step. Without this,
-        # batched runs would iterate cells past their individual convergence
-        # point and chunk-size parity would break at machine precision.
+        # iteration where its |ci_candidate - ci_work| first drops below the
+        # internal convergence threshold. That preserves the per-cell stopping
+        # point of the scalar Brent fallback — the returned Ci is the ci_in
+        # for which the residual was already small, not the iterate after one
+        # more step.
+        #
+        # Picard converges linearly, so |Ci - Ci_true| ~ L/(1-L) * residual
+        # where L is the contraction factor. Brent's bracketing converges
+        # quadratically and lands much closer to Ci_true at the same residual
+        # tolerance. The downstream energy-balance Picard loop amplifies any
+        # leftover Ci error, which broke the MATLAB benchmark parity test at
+        # ci_tol = 1e-7. Run the inner Picard to a tighter internal tolerance
+        # so the converged Ci agrees with Brent's converged Ci to many more
+        # decimals — and re-derive `fcount` from the user-facing tol so the
+        # public convergence-count contract is unchanged.
+        # Vectorised path: tighten the inner tolerance so the converged Ci
+        # agrees with scalar Brent to many more decimals. The user-facing
+        # `tol` controls the fallback trigger, not the inner stopping.
+        tol_internal = min(tol * 1e-5, 1e-12)
         ci_work = ci_initial.detach().clone()
         done = zero_intercept.clone()
         fcount = 1
         with torch.no_grad():
-            for _ in range(max_iter):
+            for iteration in range(1, max_iter + 1):
                 assimilation = self._compute_assimilation(
                     Ci=ci_work,
                     canopy_type=canopy_type,
@@ -445,7 +504,7 @@ class LeafBiochemistryModel:
                     min_ci,
                 )
                 cell_diff = (ci_candidate - ci_work).abs()
-                newly_done = (cell_diff <= tol) & (~done)
+                newly_done = (cell_diff <= tol_internal) & (~done)
                 # Cells that converged this iter keep ci_work (= ci_in); still-
                 # iterating cells advance to ci_candidate.
                 advance = (~done) & (~newly_done)
