@@ -400,39 +400,122 @@ class LeafBiochemistryModel:
         tol: float,
         max_iter: int,
     ) -> dict[str, torch.Tensor | int]:
-        ci = self._ball_berry(Cs, RH, None, BallBerrySlope, BallBerry0, min_ci)
+        ci_initial = self._ball_berry(Cs, RH, None, BallBerrySlope, BallBerry0, min_ci)
         zero_intercept = BallBerry0 == 0
         if zero_intercept.all():
-            return {"Ci": ci, "fcount": 1}
+            return {"Ci": ci_initial, "fcount": 1}
 
-        ci = ci.clone()
-        max_fcount = 1
-        solve_indices = torch.nonzero(~zero_intercept, as_tuple=False).reshape(-1)
-        for raw_idx in solve_indices.tolist():
-            idx = int(raw_idx)
-            ci_value, fcount = self._solve_ci_scalar_brent(
-                Cs=Cs[idx : idx + 1],
-                RH=RH[idx : idx + 1],
-                min_ci=min_ci,
-                BallBerrySlope=BallBerrySlope[idx : idx + 1],
-                BallBerry0=BallBerry0[idx : idx + 1],
-                ppm2bar=ppm2bar[idx : idx + 1],
-                canopy_type=canopy_type,
-                g_m=g_m[idx : idx + 1],
-                Vs_C3=Vs_C3[idx : idx + 1],
-                MM_consts=MM_consts[idx : idx + 1],
-                Rd=Rd[idx : idx + 1],
-                Vcmax=Vcmax[idx : idx + 1],
-                Gamma_star=Gamma_star[idx : idx + 1],
-                Je=Je[idx : idx + 1],
-                effcon=effcon[idx : idx + 1],
-                Ke=Ke[idx : idx + 1],
-                tol=tol,
-                max_iter=max_iter,
-            )
-            ci[idx] = ci_value
-            max_fcount = max(max_fcount, fcount)
-        return {"Ci": ci, "fcount": max_fcount}
+        # Vectorized fixed-point iteration for non-zero-intercept cells. The
+        # iteration runs under no_grad because `__call__` re-evaluates
+        # `_compute_assimilation` on the converged Ci to recover the gradient
+        # path (matching the per-cell Brent fallback below, which discards
+        # autograd via .item() calls).
+        #
+        # We track a per-cell ``done`` mask so each cell stops updating at the
+        # iteration where its |ci_candidate - ci_work| first drops below tol.
+        # That preserves the per-cell stopping point of the scalar Brent
+        # fallback — the returned Ci is the ci_in for which the residual was
+        # already small, not the iterate after one more step. Without this,
+        # batched runs would iterate cells past their individual convergence
+        # point and chunk-size parity would break at machine precision.
+        ci_work = ci_initial.detach().clone()
+        done = zero_intercept.clone()
+        fcount = 1
+        with torch.no_grad():
+            for _ in range(max_iter):
+                assimilation = self._compute_assimilation(
+                    Ci=ci_work,
+                    canopy_type=canopy_type,
+                    g_m=g_m,
+                    Vs_C3=Vs_C3,
+                    MM_consts=MM_consts,
+                    Rd=Rd,
+                    Vcmax=Vcmax,
+                    Gamma_star=Gamma_star,
+                    Je=Je,
+                    effcon=effcon,
+                    Ke=Ke,
+                )
+                ci_candidate = self._ball_berry(
+                    Cs,
+                    RH,
+                    assimilation["A"] * ppm2bar,
+                    BallBerrySlope,
+                    BallBerry0,
+                    min_ci,
+                )
+                cell_diff = (ci_candidate - ci_work).abs()
+                newly_done = (cell_diff <= tol) & (~done)
+                # Cells that converged this iter keep ci_work (= ci_in); still-
+                # iterating cells advance to ci_candidate.
+                advance = (~done) & (~newly_done)
+                ci_work = torch.where(advance, ci_candidate, ci_work)
+                done = done | newly_done
+                fcount += 1
+                if bool(done.all().item()):
+                    break
+        converged_globally = bool(done.all().item())
+
+        if not converged_globally:
+            # Fixed-point failed to converge to tol for some cells. Fall back
+            # to the per-cell Brent for the offending indices to preserve
+            # robustness. In practice this almost never fires for typical
+            # crop biochem inputs.
+            with torch.no_grad():
+                assimilation = self._compute_assimilation(
+                    Ci=ci_work,
+                    canopy_type=canopy_type,
+                    g_m=g_m,
+                    Vs_C3=Vs_C3,
+                    MM_consts=MM_consts,
+                    Rd=Rd,
+                    Vcmax=Vcmax,
+                    Gamma_star=Gamma_star,
+                    Je=Je,
+                    effcon=effcon,
+                    Ke=Ke,
+                )
+                ci_check = self._ball_berry(
+                    Cs,
+                    RH,
+                    assimilation["A"] * ppm2bar,
+                    BallBerrySlope,
+                    BallBerry0,
+                    min_ci,
+                )
+                final_diff = (ci_check - ci_work).abs()
+            unconverged = (final_diff > tol) & (~zero_intercept)
+            if bool(unconverged.any().item()):
+                stragglers = torch.nonzero(unconverged, as_tuple=False).reshape(-1)
+                for raw_idx in stragglers.tolist():
+                    idx = int(raw_idx)
+                    ci_value, brent_fcount = self._solve_ci_scalar_brent(
+                        Cs=Cs[idx : idx + 1],
+                        RH=RH[idx : idx + 1],
+                        min_ci=min_ci,
+                        BallBerrySlope=BallBerrySlope[idx : idx + 1],
+                        BallBerry0=BallBerry0[idx : idx + 1],
+                        ppm2bar=ppm2bar[idx : idx + 1],
+                        canopy_type=canopy_type,
+                        g_m=g_m[idx : idx + 1],
+                        Vs_C3=Vs_C3[idx : idx + 1],
+                        MM_consts=MM_consts[idx : idx + 1],
+                        Rd=Rd[idx : idx + 1],
+                        Vcmax=Vcmax[idx : idx + 1],
+                        Gamma_star=Gamma_star[idx : idx + 1],
+                        Je=Je[idx : idx + 1],
+                        effcon=effcon[idx : idx + 1],
+                        Ke=Ke[idx : idx + 1],
+                        tol=tol,
+                        max_iter=max_iter,
+                    )
+                    ci_work[idx] = ci_value
+                    fcount = max(fcount, brent_fcount)
+
+        # Restore gradient path for zero-intercept cells (which had a
+        # closed-form solution in the initial _ball_berry call).
+        ci_final = torch.where(zero_intercept, ci_initial, ci_work)
+        return {"Ci": ci_final, "fcount": fcount}
 
     def _solve_ci_scalar_brent(
         self,
