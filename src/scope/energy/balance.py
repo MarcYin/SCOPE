@@ -306,14 +306,34 @@ class CanopyEnergyBalanceModel:
         shaded = None
         thermal = None
         resistances = None
+        rac = ras = None
+        shaded_flux = sunlit_flux = soil_flux = None
+        Rnhc = Rnuc = Rnhs = Rnus = None
+        EBerch = EBercu = EBers = None
         lEch = Hch = lEcu = Hcu = None
-        lEs = Hs = G = None
+        lEs = Hs = G = dG = None
+        soil_t = None
         max_error = torch.full((batch,), torch.inf, device=device, dtype=dtype)
         sunlit_Cs_input = shaded_Cs_input = None
         sunlit_eb_input = shaded_eb_input = None
         sunlit_T_input = shaded_T_input = None
 
-        for iteration in range(1, opts.max_iter + 1):
+        def _picard_iter() -> None:
+            """One Picard iteration body. Mutates closure-shared state vars.
+
+            Reads: Cch, Ccu, ech, ecu, L, Tch, Tcu, Tsh, Tsu, active (state in).
+            Writes: same state vars (updated by where() on iterating mask), plus
+            sunlit/shaded/thermal/resistances/flux objects, R*, EB*, max_error,
+            *_input snapshots, soil_t, dG, lE*, H*, G (used by T-update + post).
+            """
+            nonlocal Cch, Ccu, ech, ecu, L, active
+            nonlocal sunlit, shaded, thermal, resistances, rac, ras
+            nonlocal shaded_flux, sunlit_flux, soil_flux
+            nonlocal Rnhc, Rnuc, Rnhs, Rnus, EBerch, EBercu, EBers
+            nonlocal lEch, Hch, lEcu, Hcu, lEs, Hs, G, dG, soil_t, max_error
+            nonlocal sunlit_Cs_input, shaded_Cs_input, sunlit_eb_input, shaded_eb_input
+            nonlocal sunlit_T_input, shaded_T_input
+
             iterating = active.clone()
             sunlit_Cs_input = Ccu.clone()
             shaded_Cs_input = Cch.clone()
@@ -434,9 +454,9 @@ class CanopyEnergyBalanceModel:
             lEs = soil_flux.latent_heat
             Hs = soil_flux.sensible_heat
 
-            ps_bottom = shortwave.transfer.Ps[:, -1]
+            ps_bottom_local = shortwave.transfer.Ps[:, -1]
             Hctot = self._aggregate_canopy(shortwave.transfer, Hcu, Hch, lai_tensor)
-            Hstot = (1.0 - ps_bottom) * Hs[:, 0] + ps_bottom * Hs[:, 1]
+            Hstot = (1.0 - ps_bottom_local) * Hs[:, 0] + ps_bottom_local * Hs[:, 1]
             Htot = Hctot + Hstot
             if opts.monin_obukhov:
                 L_new = self._monin_obukhov_length(ta, resistances.ustar, Htot)
@@ -474,14 +494,15 @@ class CanopyEnergyBalanceModel:
             L = torch.where(iterating, L_new, L)
 
             active = max_error > opts.max_energy_error
-            if iteration == opts.max_iter:
-                break
-            if not opts.fixed_iterations and not bool(active.any().item()):
-                break
 
-            if iteration == 10:
+        def _picard_t_update(iteration_num: int) -> None:
+            """Advance the Picard temperature state. Runs between iters,
+            not on the iter that triggers a break."""
+            nonlocal Wc, Tch, Tcu, Tsh, Tsu, soil_t
+
+            if iteration_num == 10:
                 Wc = 0.8
-            elif iteration == 20:
+            elif iteration_num == 20:
                 Wc = 0.6
 
             rac_term = rac.view(batch, 1).clamp(min=1e-12)
@@ -528,23 +549,52 @@ class CanopyEnergyBalanceModel:
             Tsh = soil_t[:, 0]
             Tsu = soil_t[:, 1]
 
-            if opts.truncate_backprop:
-                # Phantom-gradient / 1-step truncated BPTT through the Picard
-                # fixed-point: detach the propagated state so the next iteration
-                # builds a fresh autograd subgraph. Each iteration's outputs
-                # still receive gradient via shortwave, lai, biochemistry, and
-                # other external tensors, but the chain across iterations is
-                # cut. Backward stays bounded to one iteration's ops regardless
-                # of how many Picard iterations the forward took.
-                Cch = Cch.detach()
-                Ccu = Ccu.detach()
-                ech = ech.detach()
-                ecu = ecu.detach()
-                L = L.detach()
-                Tch = Tch.detach()
-                Tcu = Tcu.detach()
-                Tsh = Tsh.detach()
-                Tsu = Tsu.detach()
+        if opts.truncate_backprop:
+            # Phantom-gradient / 1-step truncated BPTT for the Picard
+            # fixed-point. Run the convergence sweep under no_grad so the
+            # autograd recording cost (which scales with iter count) is
+            # eliminated. Snapshot the state at the start of every iter so
+            # we can rewind to the iter that triggered the break and re-run
+            # it with grad enabled. The grad-bearing outputs come from that
+            # one final iter — at convergence, the iterate is independent
+            # of the trajectory that produced it, so a single iter at the
+            # converged state is a faithful approximation of the implicit
+            # gradient.
+            iter_entry_snapshot: tuple[torch.Tensor, ...] | None = None
+            iteration = 0
+            with torch.no_grad():
+                for iteration in range(1, opts.max_iter + 1):
+                    iter_entry_snapshot = (
+                        Cch.clone(),
+                        Ccu.clone(),
+                        ech.clone(),
+                        ecu.clone(),
+                        L.clone(),
+                        Tch.clone(),
+                        Tcu.clone(),
+                        Tsh.clone(),
+                        Tsu.clone(),
+                        active.clone(),
+                    )
+                    _picard_iter()
+                    if iteration == opts.max_iter:
+                        break
+                    if not opts.fixed_iterations and not bool(active.any().item()):
+                        break
+                    _picard_t_update(iteration)
+
+            assert iter_entry_snapshot is not None
+            (Cch, Ccu, ech, ecu, L, Tch, Tcu, Tsh, Tsu, active) = iter_entry_snapshot
+            with torch.enable_grad():
+                _picard_iter()
+        else:
+            for iteration in range(1, opts.max_iter + 1):
+                _picard_iter()
+                if iteration == opts.max_iter:
+                    break
+                if not opts.fixed_iterations and not bool(active.any().item()):
+                    break
+                _picard_t_update(iteration)
 
         if (
             sunlit is None
