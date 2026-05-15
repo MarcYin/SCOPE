@@ -180,7 +180,7 @@ __all__ = [
 try:  # pragma: no cover
     __version__ = _pkg_version("SCOPE-RTM")
 except Exception:  # pragma: no cover
-    __version__ = "0.4.10"
+    __version__ = "0.4.11"
 
 
 apply_registry_docstrings(

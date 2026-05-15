@@ -83,39 +83,45 @@ def test_leaf_biochemistry_iterative_intercept_solves_ball_berry_fixed_point():
     assert result.fcount > 1
 
 
-def test_leaf_biochemistry_vectorised_ci_solver_satisfies_ball_berry_fixed_point():
-    """Opt-in vectorised _solve_ci must produce a Ball-Berry fixed point.
+def test_leaf_biochemistry_vectorised_ci_solver_matches_scalar_brent_bit_for_bit():
+    """The vectorised Brent path must produce bit-exact Ci as the scalar path.
 
-    The vectorised path uses a batched no_grad Picard iteration instead of
-    per-cell scalar Brent. Different convergence trajectory + multiple roots
-    in the Ball-Berry × Farquhar coupling mean the converged Ci can differ
-    from scalar Brent for some cells, so this path is opt-in and not used
-    by the MATLAB benchmark fixtures. What we *do* require is that whatever
-    Ci it returns is a fixed point of the Ball-Berry equation to high
-    precision — i.e. ci_next == ci_in once converged.
+    The vectorised solver runs the same Brent-Dekker algorithm as the
+    per-cell scalar fallback, with state vectors and torch.where-masked
+    updates so all cells advance in lockstep. Same root selection, same
+    iteration count per cell, same residuals — so the converged Ci must
+    agree exactly (no atol/rtol slack). This is what lets the MATLAB
+    benchmark parity tests pass under vectorised_ci_solver=True at the
+    strict 1e-9 relative tolerance.
     """
     model = LeafBiochemistryModel(dtype=torch.float64)
-    leafbio, meteo = _make_c3_inputs(intercept=0.01)
-
-    result = model(
-        leafbio,
-        meteo,
-        options=BiochemicalOptions(ci_tol=1e-10, max_iter=120, vectorised_ci_solver=True),
+    # A batch where every cell exercises the non-zero-intercept Brent path.
+    torch.manual_seed(0)
+    batch = 32
+    leafbio = LeafBiochemistryInputs(
+        Vcmax25=torch.empty(batch, dtype=torch.float64).uniform_(40.0, 120.0),
+        BallBerrySlope=torch.empty(batch, dtype=torch.float64).uniform_(5.0, 12.0),
+        BallBerry0=torch.full((batch,), 0.01, dtype=torch.float64),
+        RdPerVcmax25=torch.full((batch,), 0.025, dtype=torch.float64),
+        Kn0=torch.full((batch,), 2.48, dtype=torch.float64),
+        Knalpha=torch.full((batch,), 2.83, dtype=torch.float64),
+        Knbeta=torch.full((batch,), 0.114, dtype=torch.float64),
+        stressfactor=torch.full((batch,), 1.0, dtype=torch.float64),
+    )
+    meteo = LeafMeteo(
+        Q=torch.empty(batch, dtype=torch.float64).uniform_(200.0, 1500.0),
+        Cs=torch.empty(batch, dtype=torch.float64).uniform_(300.0, 420.0),
+        T=torch.empty(batch, dtype=torch.float64).uniform_(18.0, 32.0),
+        eb=torch.empty(batch, dtype=torch.float64).uniform_(10.0, 22.0),
+        Oa=torch.full((batch,), 209.0, dtype=torch.float64),
+        p=torch.full((batch,), 1000.0, dtype=torch.float64),
     )
 
-    ppm2bar = 1e-6 * (meteo.p * 1e-3)
-    ci_bar = result.Ci * ppm2bar
-    cs_bar = meteo.Cs * ppm2bar
-    ci_next = model._ball_berry(
-        cs_bar,
-        result.RH,
-        result.A * ppm2bar,
-        leafbio.BallBerrySlope,
-        leafbio.BallBerry0,
-        0.3,
-    )
-    assert torch.allclose(ci_bar, ci_next, atol=2e-10, rtol=1e-10)
-    assert result.fcount > 1
+    scalar = model(leafbio, meteo, options=BiochemicalOptions(ci_tol=1e-7, max_iter=120, vectorised_ci_solver=False))
+    vectorised = model(leafbio, meteo, options=BiochemicalOptions(ci_tol=1e-7, max_iter=120, vectorised_ci_solver=True))
+
+    assert torch.equal(scalar.Ci, vectorised.Ci)
+    assert torch.equal(scalar.A, vectorised.A)
 
 
 def test_leaf_biochemistry_c4_path_returns_finite_fluxes():
