@@ -46,7 +46,7 @@ from ..canopy.fluorescence import (
     CanopyFluorescenceProfileResult,
     CanopyFluorescenceResult,
 )
-from ..canopy.foursail import FourSAILModel
+from ..canopy.foursail import FourSAILModel, campbell_lidf
 from ..canopy.reflectance import (
     CanopyRadiationProfileResult,
     CanopyReflectanceModel,
@@ -96,6 +96,7 @@ class _EnergyBatchInputs:
     Tch0: torch.Tensor | None
     Tsu0: torch.Tensor | None
     Tsh0: torch.Tensor | None
+    lidf: torch.Tensor | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -298,6 +299,7 @@ class ScopeGridRunner:
             tto = batch[varmap["tto"]]
             psi = batch[varmap["psi"]]
             soil = self._soil_refl(batch, varmap)
+            lidf = self._resolve_lidf(batch, varmap)
             if hotspot_var and hotspot_var in batch:
                 hotspot = batch[hotspot_var]
             else:
@@ -311,6 +313,7 @@ class ScopeGridRunner:
                 tto,
                 psi,
                 hotspot=hotspot,
+                lidf=lidf,
                 nlayers=self._layer_count(nlayers, etau=None, etah=None, Tcu=None, Tch=None),
             )
             for name in outputs:
@@ -655,6 +658,7 @@ class ScopeGridRunner:
         Esun_lw = self._optional_spectral_input(batch, varmap, "Esun_lw")
         Esky_lw = self._optional_spectral_input(batch, varmap, "Esky_lw")
         soil_refl = self._soil_refl(batch, varmap)
+        lidf = self._resolve_lidf(batch, varmap)
         hotspot = (
             batch[hotspot_var] if hotspot_var and hotspot_var in batch else torch.full_like(lai, self.default_hotspot)
         )
@@ -723,6 +727,7 @@ class ScopeGridRunner:
             Tch0=Tch0,
             Tsu0=Tsu0,
             Tsh0=Tsh0,
+            lidf=lidf,
         )
 
     def _solve_energy_batch(
@@ -750,6 +755,7 @@ class ScopeGridRunner:
             options=energy_options,
             biochem_options=biochem_options,
             hotspot=inputs.hotspot,
+            lidf=inputs.lidf,
             nlayers=inputs.nlayers,
             Tcu0=inputs.Tcu0,
             Tch0=inputs.Tch0,
@@ -912,6 +918,7 @@ class ScopeGridRunner:
                 options=energy_options,
                 biochem_options=biochem_options,
                 hotspot=inputs.hotspot,
+                lidf=inputs.lidf,
                 nlayers=inputs.nlayers,
                 Tcu0=inputs.Tcu0,
                 Tch0=inputs.Tch0,
@@ -1009,6 +1016,7 @@ class ScopeGridRunner:
                 options=energy_options,
                 biochem_options=biochem_options,
                 hotspot=inputs.hotspot,
+                lidf=inputs.lidf,
                 nlayers=inputs.nlayers,
                 Tcu0=inputs.Tcu0,
                 Tch0=inputs.Tch0,
@@ -1078,6 +1086,7 @@ class ScopeGridRunner:
             psi = batch[varmap["psi"]]
             excitation = self._excitation(batch, varmap)
             soil = self._soil_refl(batch, varmap)
+            lidf = self._resolve_lidf(batch, varmap)
             if hotspot_var and hotspot_var in batch:
                 hotspot = batch[hotspot_var]
             else:
@@ -1092,6 +1101,7 @@ class ScopeGridRunner:
                 psi,
                 excitation,
                 hotspot=hotspot,
+                lidf=lidf,
             )
             for name in outputs:
                 self._append_output(outputs, name, getattr(result, name), assembly)
@@ -1326,6 +1336,7 @@ class ScopeGridRunner:
             Esun = self._spectral_input(batch, varmap, "Esun_")
             Esky = self._spectral_input(batch, varmap, "Esky_")
             soil = self._soil_refl(batch, varmap)
+            lidf = self._resolve_lidf(batch, varmap)
             etau = batch[varmap["etau"]] if "etau" in varmap and varmap["etau"] in batch else None
             etah = batch[varmap["etah"]] if "etah" in varmap and varmap["etah"] in batch else None
             if hotspot_var and hotspot_var in batch:
@@ -1345,6 +1356,7 @@ class ScopeGridRunner:
                 etau=etau,
                 etah=etah,
                 hotspot=hotspot,
+                lidf=lidf,
                 nlayers=self._layer_count(nlayers, etau=etau, etah=etah, Tcu=None, Tch=None),
             )
             for name in outputs:
@@ -3318,6 +3330,37 @@ class ScopeGridRunner:
             if field in varmap and varmap[field] in batch:
                 kwargs[field] = batch[varmap[field]]
         return kwargs
+
+    def _resolve_lidf(
+        self,
+        batch: Mapping[str, torch.Tensor],
+        varmap: Mapping[str, str],
+    ) -> torch.Tensor:
+        """Return per-pixel Campbell LIDF from batch ALA when available.
+
+        Looks up the average leaf angle (case-insensitive: ``ALA`` or ``ala``)
+        in the batch through ``varmap`` and computes a per-pixel Campbell
+        leaf-inclination distribution at the same n_elements resolution as
+        the runner's default ``self.lidf``. Falls back to the static
+        ``self.lidf`` (a single 1-D LIDF applied to all cells) when ALA is
+        not present.
+
+        Callers should pass the returned tensor as ``lidf=`` to the
+        underlying canopy / fluorescence / thermal / energy-balance model.
+        Per-pixel LIDF has shape ``(batch, n_elements)`` and broadcasts
+        through the canopy RT chain.
+        """
+        for key in ("ALA", "ala"):
+            mapped = varmap.get(key, key)
+            if mapped in batch:
+                ala = batch[mapped]
+                return campbell_lidf(
+                    ala,
+                    n_elements=self.lidf.shape[-1],
+                    device=ala.device,
+                    dtype=ala.dtype,
+                )
+        return self.lidf
 
     def _biochemistry_kwargs(
         self, batch: Mapping[str, torch.Tensor], varmap: Mapping[str, str]

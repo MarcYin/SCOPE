@@ -652,6 +652,68 @@ def test_scope_grid_runner_energy_balance_preserves_resistance_and_canopy_gradie
         assert torch.any(torch.abs(tensor.grad) > 0)
 
 
+def test_scope_grid_runner_per_pixel_ala_resolves_per_cell_lidf():
+    """Per-pixel ALA in the batch dataset must produce per-cell LIDF.
+
+    Previously the runner used a single static ``self.lidf`` for every
+    cell, so canopy geometry was uniform regardless of the ALA values
+    delivered by ARC's biophysical retrievals. The ``_resolve_lidf``
+    helper now reads ``ALA``/``ala`` from the batch via varmap and
+    constructs a per-cell Campbell LIDF. This test exercises the
+    reflectance forward and verifies (1) per-cell ALAs produce per-cell
+    rdd, (2) results differ from the fallback static LIDF.
+    """
+    import numpy as np
+    import pandas as pd
+    import xarray as xr
+
+    device = torch.device("cpu")
+    dtype = torch.float64
+    runner, spectral = _build_execution_mode_runner(device=device, dtype=dtype)
+
+    times = pd.date_range("2020-07-01", periods=1, freq="h")
+    nwl = int(spectral.wlP.numel())
+
+    def _build_dataset(*, ala_values: tuple[float, float] | None) -> xr.Dataset:
+        data = {
+            "Cab": (("y", "x", "time"), np.full((1, 2, 1), 45.0)),
+            "Cw": (("y", "x", "time"), np.full((1, 2, 1), 0.01)),
+            "Cdm": (("y", "x", "time"), np.full((1, 2, 1), 0.012)),
+            "LAI": (("y", "x", "time"), np.full((1, 2, 1), 3.0)),
+            "tts": (("y", "x", "time"), np.full((1, 2, 1), 30.0)),
+            "tto": (("y", "x", "time"), np.full((1, 2, 1), 20.0)),
+            "psi": (("y", "x", "time"), np.full((1, 2, 1), 10.0)),
+            "soil_refl": (("y", "x", "time", "wavelength"), np.full((1, 2, 1, nwl), 0.2)),
+        }
+        if ala_values is not None:
+            data["ALA"] = (
+                ("y", "x", "time"),
+                np.array([[[ala_values[0]], [ala_values[1]]]], dtype=np.float64),
+            )
+        return xr.Dataset(
+            data,
+            coords={"y": [0], "x": [0, 1], "time": times, "wavelength": np.arange(nwl)},
+        )
+
+    ds_no_ala = _build_dataset(ala_values=None)
+    ds_with_ala = _build_dataset(ala_values=(45.0, 65.0))
+
+    module_no_ala = _build_execution_mode_module(ds_no_ala, dtype=dtype, chunk_size=2)
+    module_with_ala = _build_execution_mode_module(ds_with_ala, dtype=dtype, chunk_size=2)
+
+    out_no_ala = runner.run(module_no_ala, varmap={n: n for n in ds_no_ala.data_vars})
+    out_with_ala = runner.run(module_with_ala, varmap={n: n for n in ds_with_ala.data_vars})
+
+    # Without ALA: both cells get the same static-LIDF reflectance.
+    assert torch.allclose(out_no_ala["rdd"][0], out_no_ala["rdd"][1], atol=1e-12)
+
+    # With per-cell ALA: the two cells diverge (planophile vs erectophile).
+    assert not torch.allclose(out_with_ala["rdd"][0], out_with_ala["rdd"][1], atol=1e-6)
+
+    # Per-cell ALA result must differ from the static-LIDF fallback.
+    assert not torch.allclose(out_with_ala["rdd"], out_no_ala["rdd"], atol=1e-6)
+
+
 def test_scope_grid_runner_energy_truncate_backprop_option_reaches_solve():
     device = torch.device("cpu")
     dtype = torch.float64
