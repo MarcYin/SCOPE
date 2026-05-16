@@ -124,6 +124,56 @@ def test_leaf_biochemistry_vectorised_ci_solver_matches_scalar_brent_bit_for_bit
     assert torch.equal(scalar.A, vectorised.A)
 
 
+def test_leaf_biochemistry_ball_berry_intercept_params_have_nonzero_gradient():
+    """BallBerrySlope and BallBerry0 must carry gradient through the SIF output.
+
+    Both parameters only enter the Ci solve via the Ball-Berry equation
+    inside `_solve_ci`, which discards autograd (scalar Brent uses .item()
+    calls; vectorised Brent runs under torch.no_grad). Before the
+    implicit-gradient recovery in `__call__`, both gradients were exactly
+    zero — making BallBerrySlope and BallBerry0 effectively non-
+    differentiable parameters. That broke EXP-008 / EXP-009 / EXP-011-
+    style inversions, which would report "BallBerrySlope pinned at prior"
+    as a science finding when it was an autograd artifact.
+
+    This test pins the gradient-recovery contract: gradients on both
+    Ball-Berry intercept parameters and on Vcmax25 (which gets an implicit
+    component through ∂Ci/∂Vcmax) must be finite and non-zero through SIF.
+    The forward output stays bit-exact because the one-step Picard at the
+    converged Ci uses a stop-gradient surrogate (see __call__).
+    """
+    model = LeafBiochemistryModel(dtype=torch.float64)
+    bbs = torch.tensor([9.0], dtype=torch.float64, requires_grad=True)
+    bb0 = torch.tensor([0.01], dtype=torch.float64, requires_grad=True)
+    vcm = torch.tensor([80.0], dtype=torch.float64, requires_grad=True)
+    leafbio = LeafBiochemistryInputs(
+        Vcmax25=vcm,
+        BallBerrySlope=bbs,
+        BallBerry0=bb0,
+        RdPerVcmax25=torch.tensor([0.025], dtype=torch.float64),
+        Kn0=torch.tensor([2.48], dtype=torch.float64),
+        Knalpha=torch.tensor([2.83], dtype=torch.float64),
+        Knbeta=torch.tensor([0.114], dtype=torch.float64),
+        stressfactor=torch.tensor([1.0], dtype=torch.float64),
+    )
+    meteo = LeafMeteo(
+        Q=torch.tensor([1000.0], dtype=torch.float64),
+        Cs=torch.tensor([400.0], dtype=torch.float64),
+        T=torch.tensor([25.0], dtype=torch.float64),
+        eb=torch.tensor([15.0], dtype=torch.float64),
+        Oa=torch.tensor([209.0], dtype=torch.float64),
+        p=torch.tensor([1000.0], dtype=torch.float64),
+    )
+    result = model(leafbio, meteo)
+    sif = result.fs * meteo.Q
+    sif.sum().backward()
+
+    for name, grad in (("BallBerrySlope", bbs.grad), ("BallBerry0", bb0.grad), ("Vcmax25", vcm.grad)):
+        assert grad is not None, f"{name} got no gradient"
+        assert torch.isfinite(grad).all(), f"{name} gradient is not finite: {grad}"
+        assert not torch.equal(grad, torch.zeros_like(grad)), f"{name} gradient is exactly zero"
+
+
 def test_leaf_biochemistry_c4_path_returns_finite_fluxes():
     model = LeafBiochemistryModel(dtype=torch.float64)
     leafbio = LeafBiochemistryInputs(

@@ -264,8 +264,60 @@ class LeafBiochemistryModel:
             max_iter=opts.max_iter,
             vectorised=opts.vectorised_ci_solver,
         )
+        # Implicit-gradient recovery. `_solve_ci` runs Brent under no_grad and
+        # returns a detached Ci, so the gradient path from
+        # (BallBerrySlope, BallBerry0) into Ci — and the implicit Vcmax25 path
+        # via A(Ci) — would otherwise be lost. Apply one Picard step at the
+        # converged Ci with grad enabled: forward is bit-exact (the Picard map
+        # is the identity at the fixed point, so ci_step == ci_star to within
+        # the solver tolerance), and the resulting tensor carries the
+        # first-order ∂Ci/∂θ derivatives through `_ball_berry`. This is the
+        # standard DEQ-style phantom-gradient surrogate for an implicit
+        # function. (It approximates rather than reproduces the full IFT
+        # gradient, which would carry an extra (1-L)^-1 factor where L is the
+        # Picard contraction at the fixed point; for Ball-Berry × Farquhar at
+        # typical crop biochem inputs L ≈ 0.3-0.5, so the surrogate captures
+        # sign and order-of-magnitude correctly. Implementing the full IFT
+        # linear-solve is a follow-up.)
+        ci_star = ci_solution["Ci"].detach()
+        Ci = ci_solution["Ci"]  # default for the C3-zero-intercept early-return case
+                                # (carries grad through initial closed-form _ball_berry)
+        nonzero_bb0 = bool((BallBerry0 != 0).any().item())
+        if nonzero_bb0:
+            assimilation_at_star = self._compute_assimilation(
+                Ci=ci_star,
+                canopy_type=canopy_type,
+                g_m=g_m,
+                Vs_C3=Vs_C3,
+                MM_consts=MM_consts,
+                Rd=Rd,
+                Vcmax=Vcmax,
+                Gamma_star=Gamma_star,
+                Je=Je,
+                effcon=effcon,
+                Ke=Ke,
+            )
+            ci_one_step = self._ball_berry(
+                Cs,
+                RH,
+                assimilation_at_star["A"] * ppm2bar,
+                BallBerrySlope,
+                BallBerry0,
+                min_ci,
+            )
+            # Stop-gradient trick: forward value = ci_star (bit-exact with
+            # the scalar Brent path, preserving MATLAB benchmark parity);
+            # gradient flows through (ci_one_step - ci_one_step.detach()),
+            # which carries ∂ci_one_step/∂θ for BallBerrySlope, BallBerry0,
+            # and the implicit Vcmax25 path while contributing zero to the
+            # forward value. Cells where BallBerry0 == 0 keep ci_solution's
+            # grad-from-initial-_ball_berry path (closed-form, no Brent).
+            ci_grad_recovered = ci_star + (ci_one_step - ci_one_step.detach())
+            bb0_active = BallBerry0 != 0
+            Ci = torch.where(bb0_active, ci_grad_recovered, ci_solution["Ci"])
+
         assimilation = self._compute_assimilation(
-            Ci=ci_solution["Ci"],
+            Ci=Ci,
             canopy_type=canopy_type,
             g_m=g_m,
             Vs_C3=Vs_C3,
@@ -281,7 +333,7 @@ class LeafBiochemistryModel:
         A = assimilation["A"]
         Ag = assimilation["Ag"]
         CO2_per_electron = assimilation["CO2_per_electron"]
-        ci_delta = Cs - ci_solution["Ci"]
+        ci_delta = Cs - Ci
         safe_ci_delta = torch.where(
             ci_delta.abs() < 1e-12,
             torch.where(ci_delta < 0.0, torch.full_like(ci_delta, -1e-12), torch.full_like(ci_delta, 1e-12)),
@@ -297,10 +349,10 @@ class LeafBiochemistryModel:
         fluorescence = self._fluorescence_model(ps, ps_rel, Kn0, Knalpha, Knbeta, Kd)
         Kpa = ps / fluorescence["fs"].clamp(min=1e-12) * self.Kf
 
-        Cc = (ci_solution["Ci"] - A / g_m) / ppm2bar
-        Ci_ppm = ci_solution["Ci"] / ppm2bar
-        kf = torch.full_like(ci_solution["Ci"], self.Kf)
-        kp0 = torch.full_like(ci_solution["Ci"], self.Kp)
+        Cc = (Ci - A / g_m) / ppm2bar
+        Ci_ppm = Ci / ppm2bar
+        kf = torch.full_like(Ci, self.Kf)
+        kp0 = torch.full_like(Ci, self.Kp)
 
         return LeafBiochemistryResult(
             A=A,
